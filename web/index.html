@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rustyfi — Semantic Compression to Rust</title>
+  <meta name="description" content="Drop any application and get a production-quality Rust version out. Rustyfi is a deterministic LLM-powered transpiler orchestrated by a typed Rust state machine." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Background canvas -->
+  <canvas id="bg-canvas"></canvas>
+
+  <!-- Nav -->
+  <nav class="nav" role="navigation" aria-label="Primary navigation">
+    <div class="nav-brand">
+      <span class="crab" aria-hidden="true">🦀</span>
+      <span class="nav-wordmark">Rustyfi</span>
+    </div>
+    <p class="nav-tagline">Semantic Compression to Rust</p>
+    <div class="nav-actions">
+      <a href="https://github.com" class="nav-link" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <span class="version-badge">v0.1.0</span>
+    </div>
+  </nav>
+
+  <!-- Main layout -->
+  <main class="main" id="main-content">
+
+    <!-- Pipeline sidebar -->
+    <aside class="sidebar" aria-label="Pipeline stages">
+      <p class="sidebar-title">Pipeline</p>
+      <ul class="stage-list" id="stage-list" role="list">
+        <li class="stage active" id="stage-Idle"       data-stage="Idle">       <span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Idle</span></li>
+        <li class="stage"       id="stage-Parsing"     data-stage="Parsing">    <span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Parsing</span></li>
+        <li class="stage"       id="stage-Scaffolding" data-stage="Scaffolding"><span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Scaffolding</span></li>
+        <li class="stage"       id="stage-Translating" data-stage="Translating"><span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Translating</span></li>
+        <li class="stage"       id="stage-Verifying"   data-stage="Verifying">  <span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Verifying</span></li>
+        <li class="stage"       id="stage-Optimizing"  data-stage="Optimizing"> <span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Optimizing</span></li>
+        <li class="stage"       id="stage-Completed"   data-stage="Completed">  <span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Completed</span></li>
+        <li class="stage"       id="stage-Failed"      data-stage="Failed">     <span class="stage-dot" aria-hidden="true"></span><span class="stage-label">Failed</span></li>
+      </ul>
+
+      <div class="stats-card" aria-live="polite">
+        <div class="stat">
+          <span class="stat-label">Files</span>
+          <span class="stat-value" id="stat-files">—</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Progress</span>
+          <span class="stat-value" id="stat-progress">0%</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Output</span>
+          <span class="stat-value" id="stat-size">—</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Drop zone + log area -->
+    <section class="workspace" aria-label="Translation workspace">
+
+      <!-- Drop zone -->
+      <div
+        class="dropzone"
+        id="dropzone"
+        role="button"
+        tabindex="0"
+        aria-label="Drop your application ZIP here, or click to browse"
+        aria-describedby="dropzone-hint"
+      >
+        <div class="dropzone-inner">
+          <div class="drop-icon" aria-hidden="true">
+            <svg width="72" height="72" viewBox="0 0 72 72" fill="none">
+              <circle cx="36" cy="36" r="34" stroke="currentColor" stroke-width="2" stroke-dasharray="8 4"/>
+              <path d="M36 22v20M28 34l8 8 8-8" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <rect x="22" y="46" width="28" height="4" rx="2" fill="currentColor" opacity="0.4"/>
+            </svg>
+          </div>
+          <h1 class="drop-title">Drop Your App Here</h1>
+          <p class="drop-sub" id="dropzone-hint">ZIP your project folder and drag it in — or click to browse</p>
+          <div class="drop-tags" aria-label="Supported languages">
+            <span class="tag">Python</span>
+            <span class="tag">TypeScript</span>
+            <span class="tag">JavaScript</span>
+            <span class="tag">Go</span>
+            <span class="tag">C / C++</span>
+            <span class="tag">Java</span>
+            <span class="tag">Ruby</span>
+          </div>
+        </div>
+        <input type="file" id="file-input" accept=".zip" aria-hidden="true" tabindex="-1" />
+      </div>
+
+      <!-- Progress bar -->
+      <div class="progress-wrap" id="progress-wrap" hidden aria-live="polite">
+        <div class="progress-bar-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" id="progress-bar-role">
+          <div class="progress-bar-fill" id="progress-bar-fill"></div>
+        </div>
+        <p class="progress-label" id="progress-label">Starting…</p>
+      </div>
+
+      <!-- Current file indicator -->
+      <div class="file-indicator" id="file-indicator" hidden aria-live="polite">
+        <span class="fi-icon" aria-hidden="true">⚙</span>
+        <span class="fi-text" id="fi-text">Processing…</span>
+      </div>
+
+      <!-- Action buttons -->
+      <div class="action-row" id="action-row">
+        <button class="btn-primary" id="btn-translate" hidden>
+          <span class="btn-icon" aria-hidden="true">⚡</span> Translate to Rust
+        </button>
+        <button class="btn-success" id="btn-download" hidden>
+          <span class="btn-icon" aria-hidden="true">⬇</span> Download Rust Project
+        </button>
+        <button class="btn-secondary" id="btn-reset" hidden>
+          Start Over
+        </button>
+      </div>
+
+      <!-- Terminal log -->
+      <div class="terminal" id="terminal" aria-label="Translation log" aria-live="polite" role="log">
+        <div class="terminal-header">
+          <span class="t-dot t-red"   aria-hidden="true"></span>
+          <span class="t-dot t-amber" aria-hidden="true"></span>
+          <span class="t-dot t-green" aria-hidden="true"></span>
+          <span class="t-title">rustyfi — output</span>
+        </div>
+        <div class="terminal-body" id="terminal-body">
+          <p class="t-line t-dim">Rustyfi v0.1.0 — ready</p>
+          <p class="t-line t-dim">Set RUSTYFI_LLM_API_KEY env var on the server before translating.</p>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- Info cards -->
+    <aside class="info-sidebar" aria-label="How it works">
+      <div class="info-card">
+        <div class="info-icon" aria-hidden="true">🧠</div>
+        <h2 class="info-title">Semantic Compression</h2>
+        <p class="info-body">LLM translates idiomatic patterns — not tokens — preserving logic, error handling, and structure.</p>
+      </div>
+      <div class="info-card">
+        <div class="info-icon" aria-hidden="true">🔒</div>
+        <h2 class="info-title">Type-System Enforced</h2>
+        <p class="info-body">Every stage transition is validated by a typed Rust state machine. Invalid states are structurally impossible.</p>
+      </div>
+      <div class="info-card">
+        <div class="info-icon" aria-hidden="true">🔄</div>
+        <h2 class="info-title">Self-Healing</h2>
+        <p class="info-body">Compiler errors feed back into the LLM fix loop. <code>cargo check</code> is the judge — not the LLM.</p>
+      </div>
+      <div class="info-card">
+        <div class="info-icon" aria-hidden="true">📦</div>
+        <h2 class="info-title">Ready to Ship</h2>
+        <p class="info-body">Output is a complete Cargo project with <code>Cargo.toml</code>, mapped dependencies, and idiomatic module layout.</p>
+      </div>
+    </aside>
+
+  </main>
+
+  <footer class="footer">
+    <p>Built with <span aria-label="love">♥</span> in Rust · <a href="/health" class="footer-link">/health</a></p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

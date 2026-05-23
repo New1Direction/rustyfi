@@ -1,0 +1,25 @@
+# Build output
+/target
+
+# Cargo lock is kept for binaries (reproducible builds)
+# Remove this line if treating as a library-only workspace
+# Cargo.lock
+
+# Generated run artifacts (uploads, output, checkpoints)
+rustyfi_output/
+rustyfi_uploads/
+/tmp/rustyfi*/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Editor / OS junk
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+Thumbs.db

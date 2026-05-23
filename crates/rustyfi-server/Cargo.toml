@@ -1,0 +1,24 @@
+[package]
+name = "rustyfi-server"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rustyfi-server"
+path = "src/main.rs"
+
+[dependencies]
+rustyfi-core       = { path = "../rustyfi-core" }
+rustyfi-engine     = { path = "../rustyfi-engine" }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
+thiserror          = { workspace = true }
+tokio              = { workspace = true }
+axum               = { workspace = true }
+tower-http         = { workspace = true }
+tempfile           = { workspace = true }
+uuid               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+zip                = { workspace = true }
+async-stream       = "0.3"
