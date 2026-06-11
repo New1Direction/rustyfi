@@ -21,7 +21,7 @@ except ImportError:  # python < 3.11 — bench/run.sh preflights tomli's presenc
 VERDICT = {True: "🟢 clean", False: "🟠 partial"}
 
 
-def load(repos_toml: Path, results_dir: Path) -> list:
+def load(repos_toml: Path, results_dir: Path) -> list[dict]:
     with open(repos_toml, "rb") as f:
         manifest = tomllib.load(f)["repo"]
     rows = []
@@ -32,8 +32,11 @@ def load(repos_toml: Path, results_dir: Path) -> list:
     return rows
 
 
-def headline(rows: list) -> dict:
+def headline(rows: list[dict]) -> dict:
+    # A pipeline failure on an achievable repo counts against the clean rate
+    # (denominator includes it, numerator can't) — failures are not exclusions.
     achievable = [r for r in rows if r["meta"]["expectation"] != "impossible" and r["result"]]
+    # median is computed over runs that produced a crate (failure stubs have no error count)
     ran = [r for r in rows if r["result"] and not r["result"].get("pipeline_failed")]
     clean = [r for r in achievable if r["result"].get("cargo_clean")]
     errors = [r["result"]["errors"] for r in ran]
@@ -47,7 +50,7 @@ def headline(rows: list) -> dict:
     }
 
 
-def render(rows: list) -> str:
+def render(rows: list[dict]) -> str:
     h = headline(rows)
     done, total = h["clean_rate"]
     pct = f"{100 * done / total:.0f}%" if total else "n/a"
@@ -78,12 +81,13 @@ def self_test() -> None:
     base = Path(__file__).parent / "testdata"
     rows = load(base / "repos.toml", base)
     h = headline(rows)
-    assert h["clean_rate"] == (1, 2), h
+    assert h["clean_rate"] == (1, 3), h
     assert h["median_errors"] == 7, h
     assert h["prompt_cache_errors"] is None, h
     md = render(rows)
-    assert "1/2 (50%)" in md, md
+    assert "1/3 (33%)" in md, md
     assert "🟢 clean" in md and "🟠 partial" in md, md
+    assert "🔴 pipeline failed" in md, md
     print("self-test: OK")
 
 

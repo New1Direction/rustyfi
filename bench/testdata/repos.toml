@@ -21,3 +21,11 @@ pinned_commit = "local"
 language = "c"
 size_tier = "large"
 expectation = "impossible"
+
+[[repo]]
+name = "delta"
+source = "x"
+pinned_commit = "local"
+language = "go"
+size_tier = "small"
+expectation = "clean"
