@@ -1,10 +1,9 @@
 use crate::errors::{state_name, TransitionError};
 use crate::events::StateEvent;
 use crate::state::{
-    CompletedContext, FailedContext, OptimizingContext, ParsingContext,
-    RustyfiState, ScaffoldingContext, TranslatingContext, VerifyingContext,
+    CompletedContext, FailedContext, OptimizingContext, ParsingContext, RustyfiState,
+    ScaffoldingContext, TranslatingContext, VerifyingContext,
 };
-
 
 /// The Rustyfi deterministic orchestrator.
 ///
@@ -61,7 +60,11 @@ impl Orchestrator {
         // ----------------------------------------------------------------
         // The Fail event is universally accepted from any non-Failed state.
         // ----------------------------------------------------------------
-        if let StateEvent::Fail { reason, recoverable } = event {
+        if let StateEvent::Fail {
+            reason,
+            recoverable,
+        } = event
+        {
             let originating_state = state_name(&self.state).to_owned();
             self.state = RustyfiState::Failed(FailedContext {
                 reason,
@@ -145,7 +148,8 @@ impl Orchestrator {
                 if next_index >= ctx.total_chunks {
                     return Err(TransitionError::InvalidPayload {
                         event: "ChunkAccepted",
-                        reason: "next_chunk_index >= total_chunks; emit TranslationComplete instead",
+                        reason:
+                            "next_chunk_index >= total_chunks; emit TranslationComplete instead",
                     });
                 }
                 let updated = TranslatingContext {
@@ -192,14 +196,13 @@ impl Orchestrator {
             }
 
             // Verifying ---------------------------------------------------
-            (
-                RustyfiState::Verifying(_),
-                StateEvent::VerifyPassed { release_config },
-            ) => RustyfiState::Optimizing(OptimizingContext {
-                release_config,
-                produced_artifacts: Vec::new(),
-                completed_passes: Vec::new(),
-            }),
+            (RustyfiState::Verifying(_), StateEvent::VerifyPassed { release_config }) => {
+                RustyfiState::Optimizing(OptimizingContext {
+                    release_config,
+                    produced_artifacts: Vec::new(),
+                    completed_passes: Vec::new(),
+                })
+            }
 
             (
                 RustyfiState::Verifying(ref ctx),
@@ -291,9 +294,7 @@ impl Default for Orchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::context::{
-        ContextManifest, LanguageMetadata, SourceLanguage,
-    };
+    use crate::context::{ContextManifest, LanguageMetadata, SourceLanguage};
     use crate::events::StateEvent;
     use crate::state::{CargoOutput, FailureReason, LtoMode, ReleaseConfig};
     use std::collections::HashMap;
@@ -366,10 +367,14 @@ mod tests {
         assert!(matches!(orch.state(), RustyfiState::Translating(_)));
 
         // Advance two chunks.
-        orch.transition(StateEvent::ChunkAccepted { next_chunk_index: 1 })
-            .unwrap();
-        orch.transition(StateEvent::ChunkAccepted { next_chunk_index: 2 })
-            .unwrap();
+        orch.transition(StateEvent::ChunkAccepted {
+            next_chunk_index: 1,
+        })
+        .unwrap();
+        orch.transition(StateEvent::ChunkAccepted {
+            next_chunk_index: 2,
+        })
+        .unwrap();
 
         orch.transition(StateEvent::TranslationComplete {
             cargo_output: cargo_output(),
@@ -401,7 +406,10 @@ mod tests {
             dependency_manifest: HashMap::new(),
             module_layout_plan: vec![],
         });
-        assert!(matches!(result, Err(TransitionError::IllegalTransition { .. })));
+        assert!(matches!(
+            result,
+            Err(TransitionError::IllegalTransition { .. })
+        ));
     }
 
     /// A retry that exceeds the ceiling must return `RetryCeilingExceeded`.
@@ -484,7 +492,10 @@ mod tests {
             total_chunks: 1,
             retry_ceiling: 1,
         });
-        assert!(matches!(result, Err(TransitionError::IllegalTransition { .. })));
+        assert!(matches!(
+            result,
+            Err(TransitionError::IllegalTransition { .. })
+        ));
     }
 
     /// Verifying → Translating (retry path) must succeed within ceiling.

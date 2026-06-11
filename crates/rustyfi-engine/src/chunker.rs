@@ -48,10 +48,14 @@ pub struct SemanticChunk {
 
 impl SemanticChunk {
     /// Whether this chunk is the first in its file.
-    pub fn is_first(&self) -> bool { self.chunk_index == 0 }
+    pub fn is_first(&self) -> bool {
+        self.chunk_index == 0
+    }
 
     /// Whether this chunk is the last in its file.
-    pub fn is_last(&self) -> bool { self.chunk_index + 1 == self.total_chunks }
+    pub fn is_last(&self) -> bool {
+        self.chunk_index + 1 == self.total_chunks
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -79,7 +83,9 @@ fn detect_boundary(line: &str, lang: &str) -> Option<String> {
         "python" => {
             for prefix in ["async def ", "def ", "class "] {
                 if let Some(rest) = trimmed.strip_prefix(prefix) {
-                    let name = rest.split('(').next()
+                    let name = rest
+                        .split('(')
+                        .next()
                         .unwrap_or("?")
                         .trim_end_matches(':')
                         .trim()
@@ -100,12 +106,20 @@ fn detect_boundary(line: &str, lang: &str) -> Option<String> {
 
         "typescript" | "javascript" => {
             for prefix in [
-                "export async function ", "export function ",
-                "async function ", "function ", "export class ",
-                "class ", "export const ", "export let ",
-                "export default function ", "export default class ",
-                "export type ", "export interface ",
-                "const ", "let ",
+                "export async function ",
+                "export function ",
+                "async function ",
+                "function ",
+                "export class ",
+                "class ",
+                "export const ",
+                "export let ",
+                "export default function ",
+                "export default class ",
+                "export type ",
+                "export interface ",
+                "const ",
+                "let ",
             ] {
                 if let Some(rest) = trimmed.strip_prefix(prefix) {
                     let name = rest
@@ -139,7 +153,9 @@ fn detect_boundary(line: &str, lang: &str) -> Option<String> {
 
         "java" | "csharp" => {
             // Simple: any non-indented line that looks like a declaration.
-            if !line.starts_with(' ') && !line.starts_with('\t') && !trimmed.is_empty()
+            if !line.starts_with(' ')
+                && !line.starts_with('\t')
+                && !trimmed.is_empty()
                 && !trimmed.starts_with("//")
                 && !trimmed.starts_with("import ")
                 && !trimmed.starts_with("package ")
@@ -153,7 +169,11 @@ fn detect_boundary(line: &str, lang: &str) -> Option<String> {
                 // Best-effort: grab identifier after last space before '('
                 let name = trimmed
                     .split_whitespace()
-                    .find(|w| w.chars().next().is_some_and(|c| c.is_alphabetic() && !w.contains('(')))
+                    .find(|w| {
+                        w.chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() && !w.contains('('))
+                    })
                     .unwrap_or("?")
                     .to_string();
                 return Some(name);
@@ -163,12 +183,16 @@ fn detect_boundary(line: &str, lang: &str) -> Option<String> {
 
         "c" | "cpp" => {
             // Non-indented line that looks like a function or type definition.
-            if !line.starts_with(' ') && !line.starts_with('\t') && !trimmed.is_empty()
+            if !line.starts_with(' ')
+                && !line.starts_with('\t')
+                && !trimmed.is_empty()
                 && !trimmed.starts_with("//")
                 && !trimmed.starts_with('#')
                 && !trimmed.starts_with("typedef")
-                && (trimmed.contains('(') || trimmed.starts_with("struct ")
-                    || trimmed.starts_with("class ") || trimmed.starts_with("enum "))
+                && (trimmed.contains('(')
+                    || trimmed.starts_with("struct ")
+                    || trimmed.starts_with("class ")
+                    || trimmed.starts_with("enum "))
             {
                 let name = trimmed
                     .split(['(', ' '])
@@ -227,14 +251,14 @@ impl SemanticChunker {
         // Fast path: fits in one chunk.
         if total_tokens <= self.max_tokens {
             return vec![SemanticChunk {
-                source_file:    source.to_path_buf(),
-                chunk_index:    0,
-                total_chunks:   1,
-                content:        content.to_string(),
-                symbol_names:   extract_all_symbols(content, lang),
+                source_file: source.to_path_buf(),
+                chunk_index: 0,
+                total_chunks: 1,
+                content: content.to_string(),
+                symbol_names: extract_all_symbols(content, lang),
                 token_estimate: total_tokens,
-                line_start:     1,
-                line_end:       lines.len().max(1),
+                line_start: 1,
+                line_end: lines.len().max(1),
             }];
         }
 
@@ -255,9 +279,9 @@ impl SemanticChunker {
         for (i, &line) in lines.iter().enumerate() {
             if let Some(name) = detect_boundary(line, lang) {
                 boundaries.push(Boundary {
-                    line_idx:    i,
+                    line_idx: i,
                     symbol_name: Some(name),
-                    token_span:  0, // computed below
+                    token_span: 0, // computed below
                 });
             }
         }
@@ -270,7 +294,11 @@ impl SemanticChunker {
         let n = boundaries.len();
         for i in 0..n {
             let start = boundaries[i].line_idx;
-            let end = if i + 1 < n { boundaries[i + 1].line_idx } else { lines.len() };
+            let end = if i + 1 < n {
+                boundaries[i + 1].line_idx
+            } else {
+                lines.len()
+            };
             let span_content: String = lines[start..end].join("\n");
             boundaries[i].token_span = estimate_tokens(&span_content);
         }
@@ -295,17 +323,17 @@ impl SemanticChunker {
             if current_tokens + b.token_span > self.max_tokens && !current_names.is_empty() {
                 // Flush current chunk.
                 let line_start = boundaries[current_start_boundary].line_idx;
-                let line_end   = b.line_idx.saturating_sub(1);
+                let line_end = b.line_idx.saturating_sub(1);
                 let chunk_content = lines[line_start..=line_end].join("\n");
                 chunks.push(SemanticChunk {
-                    source_file:    source.to_path_buf(),
-                    chunk_index:    chunks.len(),
-                    total_chunks:   0, // filled in below
-                    content:        chunk_content,
-                    symbol_names:   std::mem::take(&mut current_names),
+                    source_file: source.to_path_buf(),
+                    chunk_index: chunks.len(),
+                    total_chunks: 0, // filled in below
+                    content: chunk_content,
+                    symbol_names: std::mem::take(&mut current_names),
                     token_estimate: current_tokens,
-                    line_start:     line_start + 1,
-                    line_end:       line_end + 1,
+                    line_start: line_start + 1,
+                    line_end: line_end + 1,
                 });
                 current_start_boundary = idx;
                 current_tokens = 0;
@@ -319,17 +347,17 @@ impl SemanticChunker {
         // Flush final chunk.
         if !current_names.is_empty() || current_tokens > 0 {
             let line_start = boundaries[current_start_boundary].line_idx;
-            let line_end   = lines.len().saturating_sub(1);
+            let line_end = lines.len().saturating_sub(1);
             let chunk_content = lines[line_start..=line_end].join("\n");
             chunks.push(SemanticChunk {
-                source_file:    source.to_path_buf(),
-                chunk_index:    chunks.len(),
-                total_chunks:   0,
-                content:        chunk_content,
-                symbol_names:   current_names,
+                source_file: source.to_path_buf(),
+                chunk_index: chunks.len(),
+                total_chunks: 0,
+                content: chunk_content,
+                symbol_names: current_names,
                 token_estimate: current_tokens,
-                line_start:     line_start + 1,
-                line_end:       line_end + 1,
+                line_start: line_start + 1,
+                line_end: line_end + 1,
             });
         }
 
@@ -339,32 +367,33 @@ impl SemanticChunker {
             let preamble = lines[..preamble_end].join("\n");
             let preamble_tokens = estimate_tokens(&preamble);
             // If preamble fits in first chunk, prepend it.
-            if !chunks.is_empty()
-                && chunks[0].token_estimate + preamble_tokens <= self.max_tokens
-            {
+            if !chunks.is_empty() && chunks[0].token_estimate + preamble_tokens <= self.max_tokens {
                 let first = &mut chunks[0];
                 first.content = format!("{preamble}\n{}", first.content);
                 first.token_estimate += preamble_tokens;
                 first.line_start = 1;
             } else {
                 // Otherwise it's its own chunk.
-                chunks.insert(0, SemanticChunk {
-                    source_file:    source.to_path_buf(),
-                    chunk_index:    0,
-                    total_chunks:   0,
-                    content:        preamble,
-                    symbol_names:   vec!["<preamble>".into()],
-                    token_estimate: preamble_tokens,
-                    line_start:     1,
-                    line_end:       preamble_end,
-                });
+                chunks.insert(
+                    0,
+                    SemanticChunk {
+                        source_file: source.to_path_buf(),
+                        chunk_index: 0,
+                        total_chunks: 0,
+                        content: preamble,
+                        symbol_names: vec!["<preamble>".into()],
+                        token_estimate: preamble_tokens,
+                        line_start: 1,
+                        line_end: preamble_end,
+                    },
+                );
             }
         }
 
         // Back-fill chunk_index and total_chunks.
         let total = chunks.len();
         for (i, c) in chunks.iter_mut().enumerate() {
-            c.chunk_index  = i;
+            c.chunk_index = i;
             c.total_chunks = total;
         }
 
@@ -374,25 +403,23 @@ impl SemanticChunker {
     /// Fallback: split by raw line count when no boundaries are found.
     fn split_by_lines(&self, source: &Path, _content: &str, lines: &[&str]) -> Vec<SemanticChunk> {
         let lines_per_chunk = ((self.max_tokens * 4) / 80).max(50); // ~80 chars/line
-        let chunks_raw: Vec<Vec<&str>> = lines
-            .chunks(lines_per_chunk)
-            .map(|c| c.to_vec())
-            .collect();
+        let chunks_raw: Vec<Vec<&str>> =
+            lines.chunks(lines_per_chunk).map(|c| c.to_vec()).collect();
         let total = chunks_raw.len();
         chunks_raw
             .into_iter()
             .enumerate()
             .map(|(i, group)| {
                 let content = group.join("\n");
-                let tokens  = estimate_tokens(&content);
+                let tokens = estimate_tokens(&content);
                 SemanticChunk {
-                    source_file:    source.to_path_buf(),
-                    chunk_index:    i,
-                    total_chunks:   total,
-                    symbol_names:   vec![format!("lines {}", i * lines_per_chunk + 1)],
+                    source_file: source.to_path_buf(),
+                    chunk_index: i,
+                    total_chunks: total,
+                    symbol_names: vec![format!("lines {}", i * lines_per_chunk + 1)],
                     token_estimate: tokens,
-                    line_start:     i * lines_per_chunk + 1,
-                    line_end:       (i + 1) * lines_per_chunk,
+                    line_start: i * lines_per_chunk + 1,
+                    line_end: (i + 1) * lines_per_chunk,
                     content,
                 }
             })
@@ -426,7 +453,9 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn p() -> PathBuf { PathBuf::from("test.py") }
+    fn p() -> PathBuf {
+        PathBuf::from("test.py")
+    }
 
     #[test]
     fn small_file_is_single_chunk() {
@@ -453,10 +482,16 @@ mod tests {
     fn large_file_splits_into_multiple_chunks() {
         // Create a synthetic large file: 100 small functions, each ~40 chars = ~10 tokens.
         // Budget = 50 tokens → expect ~20 chunks.
-        let src: String = (0..100).map(|i| format!("def fn_{i}():\n    pass\n\n")).collect();
+        let src: String = (0..100)
+            .map(|i| format!("def fn_{i}():\n    pass\n\n"))
+            .collect();
         let chunker = SemanticChunker::new(50);
         let chunks = chunker.chunk(&p(), &src, "python");
-        assert!(chunks.len() > 1, "Expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "Expected multiple chunks, got {}",
+            chunks.len()
+        );
         // All chunks have consistent total_chunks.
         let total = chunks[0].total_chunks;
         for c in &chunks {
@@ -466,7 +501,9 @@ mod tests {
 
     #[test]
     fn chunk_indices_are_contiguous() {
-        let src: String = (0..50).map(|i| format!("def f_{i}():\n    pass\n\n")).collect();
+        let src: String = (0..50)
+            .map(|i| format!("def f_{i}():\n    pass\n\n"))
+            .collect();
         let chunker = SemanticChunker::new(100);
         let chunks = chunker.chunk(&p(), &src, "python");
         for (i, c) in chunks.iter().enumerate() {
@@ -476,11 +513,14 @@ mod tests {
 
     #[test]
     fn go_boundary_detected() {
-        let src = "package main\n\nfunc Hello() string {\n    return \"hi\"\n}\n\nfunc main() {\n}\n";
+        let src =
+            "package main\n\nfunc Hello() string {\n    return \"hi\"\n}\n\nfunc main() {\n}\n";
         let chunker = SemanticChunker::new(5_000);
         let chunks = chunker.chunk(&PathBuf::from("main.go"), src, "go");
         let names: Vec<_> = chunks.iter().flat_map(|c| c.symbol_names.clone()).collect();
-        assert!(names.iter().any(|n| n.contains("Hello") || n.contains("main")));
+        assert!(names
+            .iter()
+            .any(|n| n.contains("Hello") || n.contains("main")));
     }
 
     #[test]

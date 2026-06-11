@@ -1,7 +1,12 @@
 [package]
 name = "rustyfi-engine"
-version = "0.1.0"
-edition = "2021"
+description = "Rustyfi's translation pipeline: analysis, contract, translate, verify, package."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 rustyfi-core = { path = "../rustyfi-core" }
@@ -15,3 +20,7 @@ uuid         = { workspace = true }
 tempfile     = { workspace = true }
 zip          = { workspace = true }
 tracing      = { workspace = true }
+rayon        = "1"
+syn          = { version = "2", features = ["full", "parsing", "extra-traits"] }
+proc-macro2  = { version = "1.0.80", features = ["span-locations"] }
+quote        = "1"

@@ -165,7 +165,8 @@ impl OwnershipGraph {
                 .unwrap_or_default();
 
             if !sigs.is_empty() {
-                let dep_name = dep.file_name()
+                let dep_name = dep
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| dep.to_string_lossy().to_string());
                 sections.push(format!(
@@ -241,10 +242,7 @@ fn extract_pub_declarations(rust_code: &str) -> Vec<String> {
                         if brace_depth <= 0 {
                             // End of declaration — extract just the signature line.
                             if let Some(sig) = current_sig.first() {
-                                let clean = sig.trim()
-                                    .trim_end_matches('{')
-                                    .trim()
-                                    .to_string();
+                                let clean = sig.trim().trim_end_matches('{').trim().to_string();
                                 if !clean.is_empty() {
                                     sigs.push(clean);
                                 }
@@ -276,6 +274,73 @@ fn extract_pub_declarations(rust_code: &str) -> Vec<String> {
     sigs
 }
 
+/// Split a generated Rust contract module into its two parts:
+/// - **data surface**: full `pub struct`/`enum`/`trait`/`type`/`const` blocks
+///   (fields preserved verbatim) — these become the *authoritative* definitions
+///   written once into the package's `mod.rs`.
+/// - **signatures**: `pub fn`/method signature lines — injected into body
+///   prompts as context only (never written as `todo!()` stubs, which the dedup
+///   pass would drop or ship).
+pub(crate) fn split_contract(rust_code: &str) -> (String, String) {
+    let mut data: Vec<String> = vec![];
+    let mut sigs: Vec<String> = vec![];
+    let mut in_block = false;
+    let mut is_fn = false;
+    let mut brace_depth: i32 = 0;
+    let mut buf: Vec<String> = vec![];
+
+    for line in rust_code.lines() {
+        let trimmed = line.trim();
+        if !in_block && is_pub_declaration_start(trimmed) {
+            in_block = true;
+            is_fn = trimmed.starts_with("pub fn ") || trimmed.starts_with("pub async fn ");
+            brace_depth = 0;
+            buf.clear();
+        }
+        if !in_block {
+            continue;
+        }
+        buf.push(line.to_string());
+        let mut closed = false;
+        for ch in line.chars() {
+            match ch {
+                '{' => brace_depth += 1,
+                '}' => {
+                    brace_depth -= 1;
+                    if brace_depth <= 0 {
+                        closed = true;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Single-line `;` declarations (type / const / static / fn-sig-only).
+        let semi_terminated = brace_depth == 0 && trimmed.ends_with(';');
+        if closed || semi_terminated {
+            if is_fn {
+                // Reduce a fn to its signature (everything up to the body `{`).
+                let joined = buf.join("\n");
+                let sig = joined
+                    .split('{')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';')
+                    .to_string();
+                if !sig.is_empty() {
+                    sigs.push(format!("{sig};"));
+                }
+            } else {
+                data.push(buf.join("\n"));
+            }
+            in_block = false;
+            buf.clear();
+        }
+    }
+    (data.join("\n\n"), sigs.join("\n"))
+}
+
 fn is_pub_declaration_start(trimmed: &str) -> bool {
     (trimmed.starts_with("pub fn ")
         || trimmed.starts_with("pub async fn ")
@@ -304,12 +369,13 @@ fn extract_name_from_sig(sig: &str) -> Option<String> {
         .trim_start_matches("const ")
         .trim_start_matches("static ");
 
-    let name = after_kind
-        .split(['(', '<', ':', ' '])
-        .next()?
-        .to_string();
+    let name = after_kind.split(['(', '<', ':', ' ']).next()?.to_string();
 
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +392,36 @@ mod tests {
         let sigs = extract_pub_declarations(code);
         assert_eq!(sigs.len(), 1);
         assert!(sigs[0].contains("greet"), "got: {:?}", sigs[0]);
+    }
+
+    #[test]
+    fn split_contract_separates_data_from_signatures() {
+        let code = "pub struct CacheEntry {\n    pub key: String,\n    pub value: Vec<u8>,\n    pub expires_at: i64,\n}\n\
+                    pub enum CacheError { NotFound, Expired }\n\
+                    pub fn get(&self, key: &str) -> Result<CacheEntry, CacheError> { todo!() }\n";
+        let (data, sigs) = split_contract(code);
+        // struct keeps ALL fields (the E0609 fix)
+        assert!(data.contains("pub key: String"), "data: {data}");
+        assert!(data.contains("pub value: Vec<u8>"), "data: {data}");
+        assert!(data.contains("pub expires_at: i64"), "data: {data}");
+        // enum kept in data
+        assert!(data.contains("pub enum CacheError"), "data: {data}");
+        // fn reduced to a signature, NOT in the data surface (no todo!() body shipped)
+        assert!(!data.contains("pub fn get"), "fn leaked into data: {data}");
+        assert!(
+            sigs.contains("pub fn get(&self, key: &str) -> Result<CacheEntry, CacheError>;"),
+            "sigs: {sigs}"
+        );
+        assert!(!sigs.contains("todo!()"), "sigs carry a body: {sigs}");
+    }
+
+    #[test]
+    fn split_contract_handles_type_aliases() {
+        let code = "pub type Id = u64;\npub const MAX: usize = 100;\npub fn f() {}\n";
+        let (data, sigs) = split_contract(code);
+        assert!(data.contains("pub type Id = u64;"), "data: {data}");
+        assert!(data.contains("pub const MAX: usize = 100;"), "data: {data}");
+        assert!(sigs.contains("pub fn f();"), "sigs: {sigs}");
     }
 
     #[test]

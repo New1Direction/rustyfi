@@ -1,0 +1,343 @@
+//! `rustyfi` — translate any codebase to Rust from the command line.
+//!
+//! No server, no browser: point it at a directory (or a `.zip`), and it drives
+//! the same engine the web UI uses, writing a Cargo crate to disk. `cargo check`
+//! is the oracle, so the exit code tells the truth:
+//!   0 = compiles clean · 1 = compiles with errors (head-start + NEXT_STEPS) · 2 = failed.
+
+mod progress;
+mod unzip;
+
+use std::fs;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+use clap::Parser;
+use console::style;
+use rustyfi_engine::pipeline::{run, RunConfig, RunResult};
+use rustyfi_engine::EngineError;
+
+#[derive(Parser)]
+#[command(
+    name = "rustyfi",
+    version,
+    about = "Translate any codebase to Rust. cargo check is the oracle. 🎺🦀",
+    long_about = None,
+)]
+struct Cli {
+    /// Source project: a directory, or a .zip archive.
+    source: PathBuf,
+
+    /// Output directory for the generated Rust crate [default: <name>-rust].
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+
+    /// Crate name [default: derived from the source].
+    #[arg(short, long)]
+    name: Option<String>,
+
+    /// Files translated concurrently.
+    #[arg(long)]
+    parallel: Option<usize>,
+
+    /// Maximum `cargo check` fix cycles.
+    #[arg(long)]
+    retries: Option<u32>,
+
+    /// Suppress the live progress display (still prints the final summary).
+    #[arg(short, long)]
+    quiet: bool,
+
+    /// Ignore cached checkpoints and translate from scratch.
+    #[arg(long)]
+    fresh: bool,
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match real_main(cli) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("\n{} {e}", style("error:").red().bold());
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn real_main(cli: Cli) -> Result<ExitCode, String> {
+    preflight_env()?;
+
+    // Resolve the source into a directory (extracting a .zip if needed).
+    let raw = cli
+        .source
+        .canonicalize()
+        .map_err(|_| format!("source not found: {}", cli.source.display()))?;
+    let _scratch; // keeps a tempdir alive for the whole run
+    let source_dir = if raw.is_file() {
+        let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+        unzip::extract_file(&raw, dir.path())
+            .map_err(|e| format!("reading {}: {e}", raw.display()))?;
+        let path = descend_single(dir.path());
+        _scratch = dir;
+        path
+    } else {
+        raw.clone()
+    };
+
+    let name = cli
+        .name
+        .clone()
+        .unwrap_or_else(|| derive_name(&source_dir, &cli.source));
+    let output = cli
+        .output
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(format!("{name}-rust")));
+
+    // Work dir keyed by a content fingerprint → identical re-runs resume,
+    // changed sources start fresh automatically (no stale-resume footgun).
+    let fp = fingerprint(&source_dir);
+    let work = std::env::temp_dir()
+        .join("rustyfi-cli")
+        .join(format!("{name}-{fp}"));
+    if cli.fresh {
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    print_banner(&source_dir, &output, &name);
+
+    let rich = !cli.quiet && std::io::stderr().is_terminal();
+    let mut ui = progress::Ui::new(rich);
+
+    let config = RunConfig {
+        source_dir,
+        output_dir: work,
+        crate_name: Some(name.clone()),
+        translate_retries: 3,
+        verify_retries: cli
+            .retries
+            .or_else(|| env_u32("RUSTYFI_VERIFY_RETRIES"))
+            .unwrap_or(4),
+        max_chunk_tokens: env_usize("RUSTYFI_CHUNK_TOKENS").unwrap_or(5000),
+        parallel: cli
+            .parallel
+            .or_else(|| env_usize("RUSTYFI_PARALLEL"))
+            .unwrap_or(16),
+        tier_fast_tokens: env_usize("RUSTYFI_TIER_FAST").unwrap_or(400),
+        tier_mid_tokens: env_usize("RUSTYFI_TIER_MID").unwrap_or(3000),
+    };
+
+    let outcome = run(config, |p| ui.handle(&p));
+    ui.finish();
+    let result = outcome.map_err(friendly_engine_err)?;
+
+    fs::create_dir_all(&output).map_err(|e| e.to_string())?;
+    let files = unzip::extract_bytes_stripping_root(&result.zip, &output)
+        .map_err(|e| format!("writing output crate: {e}"))?;
+
+    print_summary(&result, &output, files);
+    Ok(if result.cargo_clean {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+// ── output ──────────────────────────────────────────────────────────────────
+
+fn print_banner(source: &Path, output: &Path, name: &str) {
+    eprintln!();
+    eprintln!(
+        "  {} {}",
+        style("rustyfi").bold().yellow(),
+        style("🎺🦀").dim()
+    );
+    eprintln!("  {}  {}", style("source").dim(), source.display());
+    eprintln!(
+        "  {}  {}  {}",
+        style("output").dim(),
+        output.display(),
+        style(format!("(crate: {name})")).dim()
+    );
+    eprintln!();
+}
+
+fn print_summary(r: &RunResult, output: &Path, files: usize) {
+    eprintln!();
+    let header = if r.cargo_clean {
+        format!("{} compiles clean", style("✓").green().bold())
+    } else if r.error_count > 0 {
+        format!(
+            "{} compiles with {} error(s) remaining",
+            style("⚠").yellow().bold(),
+            r.error_count
+        )
+    } else {
+        format!("{} done", style("✓").green().bold())
+    };
+    eprintln!("  {header}");
+    eprintln!(
+        "  {} {} from {} · {} file(s) written · {} todo!() stub(s)",
+        style("·").dim(),
+        style(format!("{} translated", r.files_translated)).bold(),
+        r.language,
+        files,
+        r.todo_count,
+    );
+    if r.files_failed > 0 {
+        eprintln!(
+            "  {} {} file(s) fell back to a stub",
+            style("·").dim(),
+            r.files_failed
+        );
+    }
+    eprintln!();
+    // The crate path goes to STDOUT so it can be captured/piped.
+    println!("{}", output.display());
+    if !r.cargo_clean {
+        eprintln!(
+            "  {} read {} for what's left to finish.",
+            style("→").cyan(),
+            style(output.join("NEXT_STEPS.md").display()).underlined(),
+        );
+    } else {
+        eprintln!(
+            "  {} cd {} && cargo run",
+            style("→").cyan(),
+            output.display(),
+        );
+    }
+    eprintln!();
+}
+
+// ── env / preflight ──────────────────────────────────────────────────────────
+
+fn preflight_env() -> Result<(), String> {
+    let provider = std::env::var("RUSTYFI_PROVIDER")
+        .unwrap_or_default()
+        .to_lowercase();
+    if provider == "grok" || provider == "xai" {
+        return Ok(());
+    }
+    let has_key = std::env::var("RUSTYFI_LLM_API_KEY")
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false);
+    if has_key {
+        return Ok(());
+    }
+    Err(format!(
+        "no LLM provider configured.\n\n  Set an API key (any OpenAI-compatible endpoint):\n\
+         \n    {}\n    {}\n    {}\n\n  …or use Grok OAuth with {}.",
+        style("export RUSTYFI_LLM_API_KEY=\"sk-…\"").cyan(),
+        style("export RUSTYFI_LLM_BASE_URL=\"https://api.deepseek.com\"").cyan(),
+        style("export RUSTYFI_LLM_MODEL=\"deepseek-chat\"").cyan(),
+        style("RUSTYFI_PROVIDER=grok").cyan(),
+    ))
+}
+
+fn friendly_engine_err(e: EngineError) -> String {
+    match e {
+        EngineError::Config(msg) => {
+            format!("{msg}\n  (check your RUSTYFI_LLM_* environment variables)")
+        }
+        EngineError::NoSourceFiles { path } => {
+            format!("no translatable source files found in {}", path.display())
+        }
+        other => other.to_string(),
+    }
+}
+
+fn env_usize(key: &str) -> Option<usize> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+fn env_u32(key: &str) -> Option<u32> {
+    std::env::var(key).ok()?.trim().parse().ok()
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+/// If `dir` contains exactly one entry and it's a directory, descend into it
+/// (a zip of `myapp/` extracts to `tmp/myapp/`).
+fn descend_single(dir: &Path) -> PathBuf {
+    let mut entries: Vec<PathBuf> = match fs::read_dir(dir) {
+        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).collect(),
+        Err(_) => return dir.to_path_buf(),
+    };
+    entries.retain(|p| p.file_name().map(|n| n != "__MACOSX").unwrap_or(true));
+    if entries.len() == 1 && entries[0].is_dir() {
+        return entries[0].clone();
+    }
+    dir.to_path_buf()
+}
+
+/// Crate-name sanitiser: lowercase, ASCII alnum + `_`, never empty. Mirrors the
+/// server so the same project yields the same name on either entry point.
+fn derive_name(source_dir: &Path, original: &Path) -> String {
+    let raw = source_dir
+        .file_name()
+        .or_else(|| original.file_stem())
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let mut out: String = raw
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    out = out.trim_matches('_').to_string();
+    if out.is_empty()
+        || !out
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+    {
+        out = format!("project_{out}");
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// Deterministic content fingerprint of a source tree (path + bytes of each
+/// file, in sorted order). `DefaultHasher` has fixed keys → stable across runs.
+fn fingerprint(dir: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut files: Vec<PathBuf> = walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .map(|e| e.into_path())
+        .collect();
+    files.sort();
+    for f in &files {
+        f.strip_prefix(dir)
+            .unwrap_or(f)
+            .to_string_lossy()
+            .hash(&mut hasher);
+        if let Ok(bytes) = fs::read(f) {
+            bytes.hash(&mut hasher);
+        }
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_name_sanitises() {
+        assert_eq!(
+            derive_name(Path::new("/x/My-App"), Path::new("My-App")),
+            "my_app"
+        );
+        assert_eq!(
+            derive_name(Path::new("/x/cool.thing"), Path::new("cool.thing")),
+            "cool_thing"
+        );
+        // must start with a letter
+        assert_eq!(
+            derive_name(Path::new("/x/123go"), Path::new("123go")),
+            "project_123go"
+        );
+    }
+}

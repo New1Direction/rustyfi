@@ -1,59 +1,374 @@
 use serde_json::json;
-use tracing::{debug, warn};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use tracing::{debug, info, warn};
 
 use crate::EngineError;
 
 // ---------------------------------------------------------------------------
-// LLM client — synchronous blocking HTTP via reqwest::blocking
+// Provider enum
 // ---------------------------------------------------------------------------
 
-/// A minimal blocking Gemini/OpenAI-compatible LLM client.
-///
-/// Supports any OpenAI-compatible endpoint.  Configured via environment
-/// variables so no secrets appear in source.
+#[derive(Debug)]
+pub enum Provider {
+    /// Any OpenAI-compatible endpoint — supports multiple keys for round-robin rotation.
+    OpenAi {
+        base_url: String,
+        api_keys: Vec<String>,
+        key_idx: AtomicUsize,
+    },
+    /// xAI Grok via grok-build OAuth — reads ~/.grok/auth.json
+    Grok,
+}
+
+/// Read env `primary`; if unset/empty, fall back to `fallback`.
+fn env_or(primary: &str, fallback: &str) -> Option<String> {
+    std::env::var(primary)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var(fallback)
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+}
+
+impl Provider {
+    /// Provider for the translation client (the `RUSTYFI_*` vars).
+    pub fn from_env() -> Result<Self, EngineError> {
+        Self::build(
+            std::env::var("RUSTYFI_PROVIDER").ok(),
+            std::env::var("RUSTYFI_LLM_API_KEY").ok(),
+            std::env::var("RUSTYFI_LLM_BASE_URL").ok(),
+        )
+    }
+
+    /// Provider for the verification fix loop — `RUSTYFI_FIX_*` overrides,
+    /// falling back to the translation config so it's a no-op unless opted in.
+    pub fn from_fix_env() -> Result<Self, EngineError> {
+        Self::build(
+            env_or("RUSTYFI_FIX_PROVIDER", "RUSTYFI_PROVIDER"),
+            env_or("RUSTYFI_FIX_API_KEY", "RUSTYFI_LLM_API_KEY"),
+            env_or("RUSTYFI_FIX_BASE_URL", "RUSTYFI_LLM_BASE_URL"),
+        )
+    }
+
+    fn build(
+        provider: Option<String>,
+        api_key: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<Self, EngineError> {
+        let kind = provider
+            .unwrap_or_else(|| "openai".to_string())
+            .to_lowercase();
+        match kind.as_str() {
+            "grok" | "xai" => Ok(Provider::Grok),
+            _ => {
+                let raw = api_key.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
+                    EngineError::Config(
+                        "RUSTYFI_LLM_API_KEY not set (required for openai provider)".into(),
+                    )
+                })?;
+                // Support comma-separated keys for round-robin rotation across
+                // multiple free-tier accounts (e.g. two Cerebras keys).
+                let api_keys: Vec<String> = raw
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if api_keys.is_empty() {
+                    return Err(EngineError::Config("RUSTYFI_LLM_API_KEY is empty".into()));
+                }
+                let base_url = base_url
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string());
+                Ok(Provider::OpenAi {
+                    base_url,
+                    api_keys,
+                    key_idx: AtomicUsize::new(0),
+                })
+            }
+        }
+    }
+
+    /// Pick the next API key in round-robin order (thread-safe).
+    fn next_key(&self) -> Option<&str> {
+        match self {
+            Provider::OpenAi {
+                api_keys, key_idx, ..
+            } => {
+                let idx = key_idx.fetch_add(1, Ordering::Relaxed) % api_keys.len();
+                Some(&api_keys[idx])
+            }
+            Provider::Grok => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grok OAuth token state
+// ---------------------------------------------------------------------------
+
+const GROK_AUTH_JSON: &str = ".grok/auth.json";
+const GROK_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
+const GROK_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
+const GROK_DEVICE_URL: &str = "https://auth.x.ai/oauth2/device/code";
+const GROK_API_BASE: &str = "https://api.x.ai/v1";
+const GROK_SCOPES: &str = "openid profile email offline_access grok-cli:access api:access";
+
+#[derive(Debug)]
+struct GrokToken {
+    jwt: String,
+    refresh_token: String,
+    expires_at: f64, // unix epoch seconds
+}
+
+impl GrokToken {
+    /// Load from ~/.grok/auth.json — matches the korgex GrokClient._load_token() logic.
+    fn load() -> Option<Self> {
+        let home = dirs_next().ok()?;
+        let path = home.join(GROK_AUTH_JSON);
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let data: serde_json::Value = serde_json::from_str(&raw).ok()?;
+
+        for (_key, val) in data.as_object()? {
+            if !_key.contains("auth.x.ai") {
+                continue;
+            }
+            let obj = val.as_object()?;
+            let jwt = obj.get("key")?.as_str()?.to_string();
+            let rt = obj.get("refresh_token")?.as_str()?.to_string();
+            let exp = parse_expires_at(obj.get("expires_at"));
+            return Some(GrokToken {
+                jwt,
+                refresh_token: rt,
+                expires_at: exp,
+            });
+        }
+        None
+    }
+
+    fn is_expired(&self) -> bool {
+        // Treat as expired 5 min early so we never send a stale token mid-request.
+        unix_now_secs() >= self.expires_at - 300.0
+    }
+
+    /// Refresh via OAuth2 refresh_token grant and write back to auth.json.
+    fn refresh(&mut self, client: &reqwest::blocking::Client) -> Result<(), EngineError> {
+        info!("Refreshing Grok JWT via auth.x.ai");
+        let resp = client
+            .post(GROK_TOKEN_URL)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!(
+                "grant_type=refresh_token&client_id={GROK_CLIENT_ID}&refresh_token={}",
+                urlenccode(&self.refresh_token)
+            ))
+            .send()
+            .map_err(|e| EngineError::Config(format!("Grok token refresh HTTP: {e}")))?;
+
+        if !resp.status().is_success() {
+            let body = resp.text().unwrap_or_default();
+            return Err(EngineError::Config(format!(
+                "Grok token refresh failed: {body}"
+            )));
+        }
+
+        let val: serde_json::Value = resp
+            .json()
+            .map_err(|e| EngineError::Config(format!("Grok refresh JSON: {e}")))?;
+
+        self.jwt = val["access_token"]
+            .as_str()
+            .ok_or_else(|| EngineError::Config("Grok refresh: no access_token".into()))?
+            .to_string();
+
+        if let Some(rt) = val["refresh_token"].as_str() {
+            self.refresh_token = rt.to_string();
+        }
+
+        let expires_in = val["expires_in"].as_f64().unwrap_or(21600.0);
+        self.expires_at = unix_now_secs() + expires_in - 300.0;
+
+        // Write back to auth.json so the grok CLI stays in sync.
+        self.save_back();
+        info!("Grok JWT refreshed, expires in {expires_in:.0}s");
+        Ok(())
+    }
+
+    fn save_back(&self) {
+        if let Ok(home) = dirs_next() {
+            let path = home.join(GROK_AUTH_JSON);
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                if let Ok(mut data) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    if let Some(obj) = data.as_object_mut() {
+                        for (_key, val) in obj.iter_mut() {
+                            if !_key.contains("auth.x.ai") {
+                                continue;
+                            }
+                            if let Some(m) = val.as_object_mut() {
+                                m.insert("key".into(), json!(self.jwt));
+                                m.insert("refresh_token".into(), json!(self.refresh_token));
+                                // Store as ISO string (matching grok CLI format)
+                                let dt = chrono_iso(self.expires_at);
+                                m.insert("expires_at".into(), json!(dt));
+                            }
+                            break;
+                        }
+                    }
+                    let _ = std::fs::write(
+                        &path,
+                        serde_json::to_string_pretty(&data).unwrap_or_default(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public LLM client
+// ---------------------------------------------------------------------------
+
+/// A blocking, thread-safe LLM client supporting OpenAI-compatible providers
+/// and Grok via xAI OAuth (auto-refresh from ~/.grok/auth.json).
 pub struct LlmClient {
-    client: reqwest::blocking::Client,
-    api_key: String,
-    base_url: String,
+    http: reqwest::blocking::Client,
     model: String,
+    provider: Provider,
+    grok_token: Mutex<Option<GrokToken>>,
+    /// Per-request timeout (seconds). The fix client gets a longer one because
+    /// reasoning models (e.g. deepseek-reasoner, o-series) take longer to think.
+    timeout_secs: u64,
 }
 
 impl LlmClient {
-    /// Construct from environment.
+    /// Translation client — the `RUSTYFI_*` vars.
     ///
-    /// Reads:
-    /// * `RUSTYFI_LLM_API_KEY`   — API key (required)
-    /// * `RUSTYFI_LLM_BASE_URL`  — Base URL (default: Gemini OpenAI compat)
-    /// * `RUSTYFI_LLM_MODEL`     — Model name (default: gemini-2.0-flash)
+    /// | Var | Default | Notes |
+    /// |-----|---------|-------|
+    /// | `RUSTYFI_PROVIDER` | `openai` | `grok` to use xAI OAuth |
+    /// | `RUSTYFI_LLM_API_KEY` | — | Required for `openai` provider |
+    /// | `RUSTYFI_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI compat endpoint |
+    /// | `RUSTYFI_LLM_MODEL` | `google/gemini-2.5-flash` / `grok-build` | Model ID |
     pub fn from_env() -> Result<Self, EngineError> {
-        let api_key = std::env::var("RUSTYFI_LLM_API_KEY").map_err(|_| {
-            EngineError::Config("RUSTYFI_LLM_API_KEY environment variable not set".into())
-        })?;
+        let timeout = std::env::var("RUSTYFI_LLM_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90);
+        Self::build(
+            Provider::from_env()?,
+            std::env::var("RUSTYFI_LLM_MODEL")
+                .ok()
+                .filter(|s| !s.trim().is_empty()),
+            timeout,
+        )
+    }
 
-        let base_url = std::env::var("RUSTYFI_LLM_BASE_URL").unwrap_or_else(|_| {
-            "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
-        });
+    /// Verification fix-loop client. Bulk translation is voluminous and cheap;
+    /// repairing compile errors is precision work that benefits from a stronger
+    /// model. Configure independently via `RUSTYFI_FIX_MODEL` (and optionally
+    /// `RUSTYFI_FIX_BASE_URL` / `RUSTYFI_FIX_API_KEY` / `RUSTYFI_FIX_PROVIDER`
+    /// to point at a different endpoint entirely, e.g. Anthropic or OpenAI).
+    /// Everything falls back to the translation config, so unset == no change.
+    pub fn for_fixing() -> Result<Self, EngineError> {
+        let timeout = std::env::var("RUSTYFI_FIX_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(180); // reasoning models think longer
+        Self::build(
+            Provider::from_fix_env()?,
+            env_or("RUSTYFI_FIX_MODEL", "RUSTYFI_LLM_MODEL"),
+            timeout,
+        )
+    }
 
-        let model = std::env::var("RUSTYFI_LLM_MODEL")
-            .unwrap_or_else(|_| "gemini-2.0-flash".to_string());
+    fn build(
+        provider: Provider,
+        model_override: Option<String>,
+        timeout_secs: u64,
+    ) -> Result<Self, EngineError> {
+        let default_model = match &provider {
+            Provider::Grok => "grok-build".to_string(),
+            Provider::OpenAi { .. } => "google/gemini-2.5-flash".to_string(),
+        };
+        let model = model_override.unwrap_or(default_model);
+
+        let http = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(timeout_secs + 30))
+            .build()
+            .map_err(|e| EngineError::Config(e.to_string()))?;
+
+        let grok_token = if matches!(provider, Provider::Grok) {
+            let token = GrokToken::load().ok_or_else(|| {
+                EngineError::Config(
+                    "Grok provider selected but ~/.grok/auth.json not found or has no token. \
+                     Run 'grok login' first or trigger /api/grok/login from the UI."
+                        .into(),
+                )
+            })?;
+            info!(
+                "Grok OAuth: loaded token {}… (expires in {:.0}s)",
+                token.jwt.get(..12).unwrap_or(&token.jwt),
+                token.expires_at - unix_now_secs()
+            );
+            Mutex::new(Some(token))
+        } else {
+            Mutex::new(None)
+        };
 
         Ok(Self {
-            client: reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .map_err(|e| EngineError::Config(e.to_string()))?,
-            api_key,
-            base_url,
+            http,
             model,
+            provider,
+            grok_token,
+            timeout_secs,
         })
     }
 
-    /// Send a single-turn completion request and return the assistant text.
+    /// Ensure we have a valid Grok JWT, refreshing if needed.
+    fn grok_jwt(&self) -> Result<String, EngineError> {
+        let mut guard = self.grok_token.lock().unwrap();
+        let token = guard
+            .as_mut()
+            .ok_or_else(|| EngineError::Config("Grok token not loaded".into()))?;
+        if token.is_expired() {
+            token.refresh(&self.http)?;
+        }
+        Ok(token.jwt.clone())
+    }
+
+    /// Send a single-turn completion and return the assistant text.
     pub fn complete(&self, system: &str, user: &str) -> Result<String, EngineError> {
-        let url = format!("{}/chat/completions", self.base_url);
+        self.complete_with_model(system, user, &self.model.clone())
+    }
+
+    /// Like `complete` but overrides the model for this one request.
+    /// Used by tiered routing to downgrade small files to faster/cheaper models.
+    pub fn complete_with_model(
+        &self,
+        system: &str,
+        user: &str,
+        model: &str,
+    ) -> Result<String, EngineError> {
+        let (url, auth_header) = match &self.provider {
+            Provider::OpenAi { base_url, .. } => {
+                let key = self
+                    .provider
+                    .next_key()
+                    .ok_or_else(|| EngineError::Config("No API keys configured".into()))?;
+                (
+                    format!("{base_url}/chat/completions"),
+                    format!("Bearer {key}"),
+                )
+            }
+            Provider::Grok => (
+                format!("{GROK_API_BASE}/chat/completions"),
+                format!("Bearer {}", self.grok_jwt()?),
+            ),
+        };
 
         let body = json!({
-            "model": self.model,
+            "model": model,
             "temperature": 0.1,
             "max_tokens": 16384,
             "messages": [
@@ -62,44 +377,147 @@ impl LlmClient {
             ]
         });
 
-        debug!("POST {} (model={})", url, self.model);
+        debug!("POST {} (model={})", url, model);
 
         let resp = self
-            .client
+            .http
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Authorization", auth_header)
             .header("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(self.timeout_secs))
             .json(&body)
             .send()
-            .map_err(|e| EngineError::Llm(format!("HTTP error: {e}")))?;
+            .map_err(|e| {
+                if e.is_timeout() {
+                    EngineError::Llm(format!(
+                        "timeout after {}s (model={model})",
+                        self.timeout_secs
+                    ))
+                } else {
+                    EngineError::Llm(format!("HTTP error: {e}"))
+                }
+            })?;
 
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().unwrap_or_default();
-            return Err(EngineError::Llm(format!(
-                "LLM HTTP {status}: {body}"
-            )));
+            // Auth failures will fail every request identically — surface them
+            // as Config errors so the pipeline can abort early instead of
+            // burning the whole retry budget per chunk.
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(EngineError::Config(format!(
+                    "The LLM provider rejected the credentials (HTTP {status}). \
+                     Check RUSTYFI_LLM_API_KEY / RUSTYFI_PROVIDER and restart the server. \
+                     Provider said: {body}"
+                )));
+            }
+            return Err(EngineError::Llm(format!("LLM HTTP {status}: {body}")));
         }
 
         let val: serde_json::Value = resp
             .json()
-            .map_err(|e| EngineError::Llm(format!("JSON parse error: {e}")))?;
+            .map_err(|e| EngineError::Llm(format!("JSON parse: {e}")))?;
 
-        let content = val
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|a| a.first())
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
+        let content = val["choices"][0]["message"]["content"]
+            .as_str()
             .unwrap_or("")
             .to_string();
 
-        if content.is_empty() {
+        if content.trim().is_empty() {
             warn!("LLM returned empty content; full response: {val}");
+            return Err(EngineError::Llm(format!(
+                "empty response from model {model} — retrying"
+            )));
         }
-
         Ok(content)
+    }
+
+    /// Returns true if this client is using the Grok provider.
+    pub fn is_grok(&self) -> bool {
+        matches!(self.provider, Provider::Grok)
+    }
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Grok device-code login helper (called from the server OAuth endpoint)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct DeviceCodeResponse {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub verification_uri_complete: Option<String>,
+    pub expires_in: u64,
+    pub interval: u64,
+}
+
+/// Start a Grok device-code flow. Returns device code info to show to the user.
+pub fn grok_device_code_start() -> Result<DeviceCodeResponse, EngineError> {
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(GROK_DEVICE_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "client_id={GROK_CLIENT_ID}&scope={}",
+            urlenccode(GROK_SCOPES)
+        ))
+        .send()
+        .map_err(|e| EngineError::Config(format!("device code request: {e}")))?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().unwrap_or_default();
+        return Err(EngineError::Config(format!("device code failed: {body}")));
+    }
+
+    resp.json::<DeviceCodeResponse>()
+        .map_err(|e| EngineError::Config(format!("device code parse: {e}")))
+}
+
+/// Poll for a completed device-code token exchange. Call in a loop every `interval` seconds.
+/// Returns `Ok(Some(access_token))` when authenticated, `Ok(None)` when still pending.
+pub fn grok_device_code_poll(device_code: &str) -> Result<Option<String>, EngineError> {
+    let client = reqwest::blocking::Client::new();
+    let resp = client
+        .post(GROK_TOKEN_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(format!(
+            "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code\
+             &device_code={device_code}&client_id={GROK_CLIENT_ID}"
+        ))
+        .send()
+        .map_err(|e| EngineError::Config(format!("device poll: {e}")))?;
+
+    let status = resp.status();
+    let val: serde_json::Value = resp
+        .json()
+        .map_err(|e| EngineError::Config(format!("device poll JSON: {e}")))?;
+
+    if status.is_success() {
+        // Token granted — save it
+        let access_token = val["access_token"].as_str().unwrap_or("").to_string();
+        let refresh_token = val["refresh_token"].as_str().unwrap_or("").to_string();
+        let expires_in = val["expires_in"].as_f64().unwrap_or(21600.0);
+
+        let token = GrokToken {
+            jwt: access_token.clone(),
+            refresh_token,
+            expires_at: unix_now_secs() + expires_in - 300.0,
+        };
+        token.save_back();
+        info!("Grok device-code auth complete, token saved to ~/.grok/auth.json");
+        return Ok(Some(access_token));
+    }
+
+    match val["error"].as_str() {
+        Some("authorization_pending") | Some("slow_down") => Ok(None),
+        Some(e) => Err(EngineError::Config(format!("device poll error: {e}"))),
+        None => Err(EngineError::Config(format!(
+            "device poll unexpected status: {status}"
+        ))),
     }
 }
 
@@ -119,7 +537,10 @@ Rules:
 6. External library calls: map to equivalent crates (see mapping below).
 7. If a construct cannot be directly mapped, emit a `todo!("reason")` placeholder.
 8. Include all necessary `use` statements at the top.
-9. Add a `Cargo.toml` dependencies comment block at the very top as:
+9. Do NOT emit `mod` or `pub mod` declarations for the project's own files — the
+   build system wires modules. To reference another file's items in this project,
+   use a `crate::<module>::Item` path (the build system normalises module paths).
+10. Add a `Cargo.toml` dependencies comment block at the very top as:
    // [DEPS] crate = "version", crate2 = "version"
 
 Language → Rust crate mapping:
@@ -135,6 +556,10 @@ Language → Rust crate mapping:
 - logging / winston → tracing
 - pydantic / zod → serde + validator
 - asyncio / async/await → tokio
+- badger / boltdb / leveldb / rocksdb / bbolt (embedded KV stores) → sled
+- gin / echo / fiber (Go web) → axum
+- uuid / google/uuid → uuid (use `uuid::Uuid::new_v4()` with the `v4` feature)
+- zerolog / zap / logrus → tracing
 "#;
 
 pub fn prompt_translate(source_code: &str, source_lang: &str, file_name: &str) -> String {
@@ -142,11 +567,6 @@ pub fn prompt_translate(source_code: &str, source_lang: &str, file_name: &str) -
 }
 
 /// Context-aware translation prompt.
-///
-/// Injects:
-/// - `rust_context`: Rust signatures of dependency files already translated.
-/// - `chunk_meta`: chunk position within the file (e.g. "chunk 2/4").
-/// - `symbol_names`: names of top-level symbols in this chunk.
 pub fn prompt_translate_with_context(
     source_code: &str,
     source_lang: &str,
@@ -174,7 +594,9 @@ pub fn prompt_translate_with_context(
         String::new()
     } else {
         format!(
-            "\nDependency context (already-translated Rust signatures — use these exact types):\n\
+            "\nProject API (these types/signatures ALREADY EXIST at the crate paths shown — \
+             implement AGAINST them; do NOT redefine any struct/enum/trait listed here; \
+             reproduce field names, parameter types and return/error types EXACTLY):\n\
              ```rust\n{rust_context}\n```\n"
         )
     };
@@ -184,22 +606,50 @@ pub fn prompt_translate_with_context(
          {context_block}\n\
          Rules:\n\
          - Output ONLY Rust source code. No markdown fences, no explanation.\n\
-         - Use the exact types from the dependency context above where applicable.\n\
+         - The Project API block above is CANONICAL: use those exact types, fields, and \
+           signatures; never invent a different shape for a project-owned type.\n\
+         - Provide impl blocks and fn bodies; do NOT redefine types already shown in the Project API.\n\
          - Use `// [DEPS] crate_name = \"version\"` comments for any new Cargo dependencies needed.\n\
          - Preserve all comments and docstrings, translated to Rust doc-comment style.\n\n\
          Source ({source_lang}):\n```{source_lang}\n{source_code}\n```"
     )
 }
 
+pub const SYSTEM_CONTRACT: &str = r#"You are an expert Rust API designer. Given the source files of ONE package/module from another language, output the canonical Rust PUBLIC API surface for it — the shared contract that every file translating against this package must agree on.
+
+Rules:
+1. Output ONLY Rust. No markdown fences, no prose.
+2. For EVERY exported type emit a `pub struct` with ALL of its public fields and a best-effort Rust field type. NEVER omit a field. If a field's type is unclear, use a reasonable Rust type (String, i64, Vec<u8>, serde_json::Value), but keep the field.
+3. For every exported enum emit `pub enum` with ALL variants. For error types prefer a real `pub enum SomethingError { ... }`.
+4. For every exported trait/interface emit `pub trait` with method signatures.
+5. For every exported function/method emit a signature line ending in `;` — NO body, NO `todo!()`.
+6. Use snake_case field/function names; PascalCase types. Be consistent.
+7. Derive `#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]` on plain data structs.
+8. Do NOT emit `use` statements, `mod` declarations, impl blocks, or any logic.
+9. Reference another project package's types by their crate path when needed (e.g. `crate::storage::Store`).
+This is a CONTRACT: it must be complete and stable, because all of this package's files and all its importers will be translated against it verbatim.
+"#;
+
+/// Build the contract-extraction prompt for one package.
+pub fn prompt_extract_contract(pkg: &str, lang: &str, labeled_source: &str) -> String {
+    format!(
+        "Extract the canonical Rust public API surface for the `{pkg}` package \
+         (written in {lang}). Emit complete `pub struct`/`enum`/`trait` definitions \
+         (ALL fields/variants) and `pub fn` signature lines only — no bodies, no \
+         markdown.\n\nPackage source:\n```{lang}\n{labeled_source}\n```"
+    )
+}
 
 pub const SYSTEM_FIX: &str = r#"You are an expert Rust programmer fixing compilation errors.
 Given Rust source code and compiler errors from `cargo check`, output a corrected version.
 
 Rules:
-1. Output ONLY the corrected Rust source code — no markdown, no explanation.
+1. Output ONLY the corrected Rust source code. NO markdown fences, NO ```rust, NO prose, NO explanation. Start your reply with the first line of code.
 2. Fix ALL listed errors. Do not introduce new ones.
-3. Keep the same overall structure and logic. Only change what is broken.
-4. Preserve all existing `use` statements and add new ones if needed.
+3. The compiler's `help:` suggestions are almost always correct — APPLY THEM EXACTLY (e.g. "a function with a similar name exists" → use that name; "remove the extra argument" → remove it; "consider borrowing here" → add the `&`).
+4. Keep the same overall structure and logic. Only change what is broken.
+5. Preserve all existing `use` statements; add new ones if needed.
+6. Output the COMPLETE file — never truncate or abbreviate with `// ...`.
 "#;
 
 pub fn prompt_fix(rust_code: &str, errors: &str) -> String {
@@ -216,16 +666,7 @@ pub fn prompt_fix(rust_code: &str, errors: &str) -> String {
 }
 
 /// Family-aware fix prompt.
-///
-/// `families` is a deduplicated, priority-sorted slice of
-/// `(DiagnosticFamily, repair_hint)` pairs derived from the classified
-/// diagnostics.  The prompt includes the top-N repair hints so the model
-/// knows *exactly* what class of errors to focus on.
-pub fn prompt_fix_targeted(
-    rust_code: &str,
-    errors: &str,
-    families: &[(&str, &str)],
-) -> String {
+pub fn prompt_fix_targeted(rust_code: &str, errors: &str, families: &[(&str, &str)]) -> String {
     let hint_block = if families.is_empty() {
         String::new()
     } else {
@@ -251,29 +692,194 @@ pub fn prompt_fix_targeted(
     )
 }
 
-
 // ---------------------------------------------------------------------------
 // Code extraction helper
 // ---------------------------------------------------------------------------
 
-/// Strip markdown code fences from LLM output (model sometimes adds them
-/// despite instructions).
+/// Strip markdown code fences from LLM output. Robust to reasoning models that
+/// prepend prose and to TRUNCATED responses that emit an opening ```` ```rust ````
+/// with no closing fence (which would otherwise leak the fence into the file
+/// and break parsing with an "unclosed delimiter" error).
 pub fn extract_rust_code(raw: &str) -> String {
-    // Try to find ```rust ... ``` or ``` ... ``` blocks.
-    let fenced = extract_fenced(raw, "rust")
-        .or_else(|| extract_fenced(raw, ""))
-        .unwrap_or_else(|| raw.to_string());
+    let trimmed = raw.trim();
 
-    fenced.trim().to_string()
+    // 1. A complete fenced block → use its contents.
+    if let Some(inner) = extract_fenced(trimmed, "rust")
+        .or_else(|| extract_fenced(trimmed, "rs"))
+        .or_else(|| extract_fenced(trimmed, ""))
+    {
+        return inner.trim().to_string();
+    }
+
+    // 2. A dangling opening fence (truncated response) → drop the fence line and
+    //    any leading prose before it, plus a trailing fence if present.
+    if let Some(pos) = trimmed.find("```") {
+        let after_fence = &trimmed[pos..];
+        let body = after_fence
+            .find('\n')
+            .map(|nl| &after_fence[nl + 1..])
+            .unwrap_or("");
+        return body.trim().trim_end_matches("```").trim().to_string();
+    }
+
+    trimmed.to_string()
 }
 
 fn extract_fenced(text: &str, lang: &str) -> Option<String> {
     let open = format!("```{lang}");
     let start = text.find(&open)?;
     let after_open = &text[start + open.len()..];
-    // Skip the rest of the opening line.
     let body_start = after_open.find('\n').map(|i| i + 1).unwrap_or(0);
     let body = &after_open[body_start..];
     let end = body.rfind("```")?;
     Some(body[..end].to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+fn unix_now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn dirs_next() -> Result<std::path::PathBuf, ()> {
+    std::env::var("HOME")
+        .map(std::path::PathBuf::from)
+        .map_err(|_| ())
+}
+
+fn parse_expires_at(val: Option<&serde_json::Value>) -> f64 {
+    let Some(v) = val else { return 0.0 };
+    // Numeric (epoch seconds)
+    if let Some(n) = v.as_f64() {
+        return n;
+    }
+    // ISO string like "2026-06-09T20:41:05.898948Z"
+    if let Some(s) = v.as_str() {
+        // Simple parse: we just need epoch seconds
+        if let Ok(secs) = s.parse::<f64>() {
+            return secs;
+        }
+        // Use a rough parse: strip trailing Z, parse with chrono if available,
+        // else fall back to 0 (will trigger a refresh on next use — safe).
+        // We don't want to add chrono just for this, so we do a minimal parse.
+        let s = s.trim_end_matches('Z').trim_end_matches('+').trim();
+        if let Ok(dt) = chrono_parse_iso(s) {
+            return dt;
+        }
+    }
+    0.0
+}
+
+fn chrono_parse_iso(s: &str) -> Result<f64, ()> {
+    // Minimal ISO 8601 parser: "2026-06-09T20:41:05"
+    let parts: Vec<&str> = s.splitn(2, 'T').collect();
+    if parts.len() != 2 {
+        return Err(());
+    }
+    let date_parts: Vec<u32> = parts[0].split('-').filter_map(|p| p.parse().ok()).collect();
+    let time_parts: Vec<u32> = parts[1]
+        .split(':')
+        .filter_map(|p| p.parse::<f64>().ok().map(|f| f as u32))
+        .collect();
+    if date_parts.len() < 3 || time_parts.len() < 3 {
+        return Err(());
+    }
+    // Approximate: compute days since epoch (good enough for expiry checks)
+    let y = date_parts[0] as i64;
+    let m = date_parts[1] as i64;
+    let d = date_parts[2] as i64;
+    // Zeller-ish
+    let days = (y - 1970) * 365 + (y - 1970) / 4 - (y - 1970) / 100
+        + (y - 1970) / 400
+        + [0i64, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][(m - 1).max(0) as usize]
+        + d
+        - 1;
+    let secs = days * 86400
+        + time_parts[0] as i64 * 3600
+        + time_parts[1] as i64 * 60
+        + time_parts[2] as i64;
+    Ok(secs as f64)
+}
+
+fn chrono_iso(epoch: f64) -> String {
+    // Format epoch seconds as ISO 8601 UTC string
+    let secs = epoch as u64;
+    let s = secs % 60;
+    let m = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    let days = secs / 86400;
+    // Simple calendar from epoch days
+    let (year, month, day) = days_to_ymd(days);
+    format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
+}
+
+fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+    let mut y = 1970u64;
+    loop {
+        let leap = (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400);
+        let dy = if leap { 366 } else { 365 };
+        if days < dy {
+            break;
+        }
+        days -= dy;
+        y += 1;
+    }
+    let leap = (y.is_multiple_of(4) && !y.is_multiple_of(100)) || y.is_multiple_of(400);
+    let month_days: &[u64] = if leap {
+        &[31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        &[31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut m = 1u64;
+    for &md in month_days {
+        if days < md {
+            break;
+        }
+        days -= md;
+        m += 1;
+    }
+    (y, m, days + 1)
+}
+
+fn urlenccode(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '~') {
+                vec![c]
+            } else {
+                format!("%{:02X}", c as u32).chars().collect()
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_clean_fenced_block() {
+        let raw = "Here is the fix:\n```rust\nfn main() {}\n```\nDone.";
+        assert_eq!(extract_rust_code(raw), "fn main() {}");
+    }
+
+    #[test]
+    fn handles_truncated_dangling_fence() {
+        // A truncated reasoning-model response: opening fence, no close.
+        let raw = "Sure, here's the corrected file:\n```rust\nuse std::fmt;\nfn x() {}";
+        let out = extract_rust_code(raw);
+        assert!(!out.contains("```"), "leaked fence: {out}");
+        assert!(out.starts_with("use std::fmt;"), "{out}");
+    }
+
+    #[test]
+    fn passes_through_plain_code() {
+        let raw = "fn a() -> i32 { 1 }\n";
+        assert_eq!(extract_rust_code(raw), "fn a() -> i32 { 1 }");
+    }
 }

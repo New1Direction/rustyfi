@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use crate::context::ContextManifest;
 use crate::state::{CargoOutput, FailureReason, ReleaseConfig};
 
-
 /// All events that can drive state transitions in the Rustyfi orchestrator.
 ///
 /// Each variant carries exactly the payload required by the transition it
@@ -17,9 +16,7 @@ pub enum StateEvent {
     // ------------------------------------------------------------------
     /// A language-analysis worker has finished and produced a validated
     /// [`ContextManifest`].  Triggers ingestion and moves to `Parsing`.
-    StartParsing {
-        manifest: Box<ContextManifest>,
-    },
+    StartParsing { manifest: Box<ContextManifest> },
 
     // ------------------------------------------------------------------
     // Parsing → Scaffolding
@@ -50,18 +47,14 @@ pub enum StateEvent {
     /// A chunk was successfully generated.  Advance the chunk cursor.
     /// If `next_chunk_index == total_chunks`, the caller should emit
     /// `TranslationComplete` instead.
-    ChunkAccepted {
-        next_chunk_index: u32,
-    },
+    ChunkAccepted { next_chunk_index: u32 },
 
     /// A chunk generation failed.  Increment the attempt counter; the
     /// orchestrator will return [`TransitionError::RetryCeilingExceeded`]
     /// if the ceiling has been reached rather than silently accepting.
     ///
     /// [`TransitionError::RetryCeilingExceeded`]: crate::errors::TransitionError::RetryCeilingExceeded
-    ChunkRetry {
-        reason: String,
-    },
+    ChunkRetry { reason: String },
 
     /// All chunks for all files have been translated successfully.
     TranslationComplete {
@@ -74,9 +67,7 @@ pub enum StateEvent {
     // ------------------------------------------------------------------
     /// `cargo check` returned zero diagnostics at error level.  The
     /// workspace is clean; proceed to optimization.
-    VerifyPassed {
-        release_config: ReleaseConfig,
-    },
+    VerifyPassed { release_config: ReleaseConfig },
 
     // ------------------------------------------------------------------
     // Verifying → Translating  (retry path)

@@ -32,7 +32,7 @@ impl From<&DependencyEdge> for EdgeRecord {
     fn from(e: &DependencyEdge) -> Self {
         Self {
             from: e.from.clone(),
-            to:   e.to.clone(),
+            to: e.to.clone(),
             import_symbol: e.import_symbol.clone(),
         }
     }
@@ -63,8 +63,11 @@ impl ModuleGraph {
     /// implicit nodes (external or inferred files).
     pub fn build(targets: &[PathBuf], edges: &[EdgeRecord]) -> Self {
         let mut nodes: Vec<PathBuf> = targets.to_vec();
-        let mut index: HashMap<PathBuf, usize> =
-            nodes.iter().enumerate().map(|(i, p)| (p.clone(), i)).collect();
+        let mut index: HashMap<PathBuf, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| (p.clone(), i))
+            .collect();
 
         // Materialise any referenced path not already in the target list.
         for e in edges {
@@ -82,9 +85,7 @@ impl ModuleGraph {
 
         for e in edges {
             // Only track internal edges (both ends in the graph).
-            if let (Some(&from_idx), Some(&to_idx)) =
-                (index.get(&e.from), index.get(&e.to))
-            {
+            if let (Some(&from_idx), Some(&to_idx)) = (index.get(&e.from), index.get(&e.to)) {
                 // Deduplicate edges.
                 if !adj[from_idx].contains(&to_idx) {
                     adj[from_idx].push(to_idx);
@@ -115,8 +116,7 @@ impl ModuleGraph {
         }
 
         // Seed queue with files that have no dependencies (pure leaf files).
-        let mut queue: VecDeque<usize> =
-            (0..n).filter(|&i| in_degree[i] == 0).collect();
+        let mut queue: VecDeque<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
         let mut order: Vec<PathBuf> = Vec::with_capacity(n);
 
         while let Some(node) = queue.pop_front() {
@@ -133,8 +133,11 @@ impl ModuleGraph {
         // Handle cycles by appending stragglers.
         if order.len() < n {
             let scheduled: HashSet<&PathBuf> = order.iter().collect();
-            let stragglers: Vec<&PathBuf> =
-                self.nodes.iter().filter(|p| !scheduled.contains(p)).collect();
+            let stragglers: Vec<&PathBuf> = self
+                .nodes
+                .iter()
+                .filter(|p| !scheduled.contains(p))
+                .collect();
             warn!(
                 "ModuleGraph: {} node(s) in a cycle — scheduling arbitrarily: {:?}",
                 stragglers.len(),
@@ -153,13 +156,15 @@ impl ModuleGraph {
     pub fn deps_of(&self, path: &Path) -> Vec<&PathBuf> {
         match self.index.get(path) {
             Some(&idx) => self.adj[idx].iter().map(|&i| &self.nodes[i]).collect(),
-            None       => vec![],
+            None => vec![],
         }
     }
 
     /// Return the files that directly import `path`.
     pub fn importers_of(&self, path: &Path) -> Vec<&PathBuf> {
-        let Some(&target_idx) = self.index.get(path) else { return vec![]; };
+        let Some(&target_idx) = self.index.get(path) else {
+            return vec![];
+        };
         self.nodes
             .iter()
             .enumerate()
@@ -169,9 +174,13 @@ impl ModuleGraph {
     }
 
     /// Total number of nodes.
-    pub fn len(&self) -> usize { self.nodes.len() }
+    pub fn len(&self) -> usize {
+        self.nodes.len()
+    }
 
-    pub fn is_empty(&self) -> bool { self.nodes.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -182,10 +191,16 @@ impl ModuleGraph {
 mod tests {
     use super::*;
 
-    fn p(s: &str) -> PathBuf { PathBuf::from(s) }
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
 
     fn edge(from: &str, to: &str) -> EdgeRecord {
-        EdgeRecord { from: p(from), to: p(to), import_symbol: "mod".into() }
+        EdgeRecord {
+            from: p(from),
+            to: p(to),
+            import_symbol: "mod".into(),
+        }
     }
 
     #[test]
@@ -204,7 +219,7 @@ mod tests {
     fn chain_translates_deps_first() {
         // a.py → b.py → c.py  (a imports b, b imports c)
         let targets = vec![p("a.py"), p("b.py"), p("c.py")];
-        let edges   = vec![edge("a.py", "b.py"), edge("b.py", "c.py")];
+        let edges = vec![edge("a.py", "b.py"), edge("b.py", "c.py")];
         let g = ModuleGraph::build(&targets, &edges);
         let order = g.translation_order();
         // c must come before b, b before a.
@@ -217,26 +232,26 @@ mod tests {
     fn diamond_dependency_order() {
         // main → a → lib, main → b → lib
         let targets = vec![p("main.py"), p("a.py"), p("b.py"), p("lib.py")];
-        let edges   = vec![
+        let edges = vec![
             edge("main.py", "a.py"),
             edge("main.py", "b.py"),
-            edge("a.py",    "lib.py"),
-            edge("b.py",    "lib.py"),
+            edge("a.py", "lib.py"),
+            edge("b.py", "lib.py"),
         ];
         let g = ModuleGraph::build(&targets, &edges);
         let order = g.translation_order();
         let pos = |f: &str| order.iter().position(|p| p == Path::new(f)).unwrap();
         assert!(pos("lib.py") < pos("a.py"));
         assert!(pos("lib.py") < pos("b.py"));
-        assert!(pos("a.py")   < pos("main.py"));
-        assert!(pos("b.py")   < pos("main.py"));
+        assert!(pos("a.py") < pos("main.py"));
+        assert!(pos("b.py") < pos("main.py"));
     }
 
     #[test]
     fn cycle_does_not_panic() {
         // a → b → a  (cycle)
         let targets = vec![p("a.py"), p("b.py")];
-        let edges   = vec![edge("a.py", "b.py"), edge("b.py", "a.py")];
+        let edges = vec![edge("a.py", "b.py"), edge("b.py", "a.py")];
         let g = ModuleGraph::build(&targets, &edges);
         let order = g.translation_order();
         // Should return both files without panicking.
@@ -246,10 +261,9 @@ mod tests {
     #[test]
     fn deps_of_returns_correct_imports() {
         let targets = vec![p("a.py"), p("b.py"), p("c.py")];
-        let edges   = vec![edge("a.py", "b.py"), edge("a.py", "c.py")];
+        let edges = vec![edge("a.py", "b.py"), edge("a.py", "c.py")];
         let g = ModuleGraph::build(&targets, &edges);
-        let mut deps: Vec<_> = g.deps_of(Path::new("a.py"))
-            .into_iter().cloned().collect();
+        let mut deps: Vec<_> = g.deps_of(Path::new("a.py")).into_iter().cloned().collect();
         deps.sort();
         assert_eq!(deps, vec![p("b.py"), p("c.py")]);
     }

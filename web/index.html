@@ -17,7 +17,17 @@
   <!-- Nav -->
   <nav class="nav" role="navigation" aria-label="Primary navigation">
     <div class="nav-brand">
-      <span class="crab" aria-hidden="true">🦀</span>
+      <!-- Trombone SVG logo -->
+      <svg class="trombone-logo" width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <rect x="2" y="13" width="5" height="6" rx="2.5" fill="currentColor" opacity="0.9"/>
+        <rect x="5" y="15" width="14" height="2.5" rx="1.25" fill="currentColor"/>
+        <rect x="17" y="11" width="2.5" height="10" rx="1.25" fill="currentColor"/>
+        <rect x="19" y="11" width="8" height="2.5" rx="1.25" fill="currentColor"/>
+        <rect x="19" y="18" width="8" height="2.5" rx="1.25" fill="currentColor"/>
+        <rect x="25" y="11" width="2.5" height="10" rx="1.25" fill="currentColor"/>
+        <rect x="7" y="10" width="2" height="5" rx="1" fill="currentColor" opacity="0.6"/>
+        <circle cx="8" cy="9" r="2" fill="currentColor" opacity="0.5"/>
+      </svg>
       <span class="nav-wordmark">Rustyfi</span>
     </div>
     <p class="nav-tagline">Semantic Compression to Rust</p>
@@ -57,6 +67,10 @@
           <span class="stat-label">Output</span>
           <span class="stat-value" id="stat-size">—</span>
         </div>
+        <div class="stat">
+          <span class="stat-label">Elapsed</span>
+          <span class="stat-value" id="stat-elapsed">—</span>
+        </div>
       </div>
     </aside>
 
@@ -89,6 +103,7 @@
             <span class="tag">Go</span>
             <span class="tag">C / C++</span>
             <span class="tag">Java</span>
+            <span class="tag">C#</span>
             <span class="tag">Ruby</span>
           </div>
         </div>
@@ -96,17 +111,33 @@
       </div>
 
       <!-- Progress bar -->
-      <div class="progress-wrap" id="progress-wrap" hidden aria-live="polite">
+      <div class="progress-wrap" id="progress-wrap" hidden>
         <div class="progress-bar-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" id="progress-bar-role">
           <div class="progress-bar-fill" id="progress-bar-fill"></div>
         </div>
         <p class="progress-label" id="progress-label">Starting…</p>
       </div>
 
-      <!-- Current file indicator -->
-      <div class="file-indicator" id="file-indicator" hidden aria-live="polite">
+      <!-- Current file indicator (decorative spinner — announced via #sr-status
+           at a sane cadence instead of 3×/second) -->
+      <div class="file-indicator" id="file-indicator" hidden>
         <span class="fi-icon" aria-hidden="true">⚙</span>
         <span class="fi-text" id="fi-text">Processing…</span>
+      </div>
+
+      <!-- Throttled screen-reader announcements -->
+      <p id="sr-status" class="visually-hidden" role="status" aria-live="polite"></p>
+
+      <!-- Result banner — the honest at-a-glance outcome -->
+      <div class="result-banner" id="result-banner" hidden role="status">
+        <div class="result-head">
+          <span class="result-icon" id="result-icon" aria-hidden="true">✓</span>
+          <div class="result-headline">
+            <p class="result-title" id="result-title">Done</p>
+            <p class="result-sub" id="result-sub"></p>
+          </div>
+        </div>
+        <div class="result-chips" id="result-chips"></div>
       </div>
 
       <!-- Action buttons -->
@@ -131,34 +162,90 @@
           <span class="t-title">rustyfi — output</span>
         </div>
         <div class="terminal-body" id="terminal-body">
-          <p class="t-line t-dim">Rustyfi v0.1.0 — ready</p>
-          <p class="t-line t-dim">Set RUSTYFI_LLM_API_KEY env var on the server before translating.</p>
+          <p class="t-line t-dim">Rustyfi — checking server status…</p>
         </div>
       </div>
 
     </section>
 
-    <!-- Info cards -->
-    <aside class="info-sidebar" aria-label="How it works">
-      <div class="info-card">
-        <div class="info-icon" aria-hidden="true">🧠</div>
-        <h2 class="info-title">Semantic Compression</h2>
-        <p class="info-body">LLM translates idiomatic patterns — not tokens — preserving logic, error handling, and structure.</p>
+    <!-- Right panel: History + Community + Provider -->
+    <aside class="info-sidebar" aria-label="Projects">
+      <!-- Tab bar -->
+      <div class="panel-tabs">
+        <button class="panel-tab active" id="tab-mine" onclick="switchTab('mine')">My Projects<span class="tab-pip" id="history-pip" hidden></span></button>
+        <button class="panel-tab" id="tab-community" onclick="switchTab('community')">Community</button>
+        <button class="panel-tab" id="tab-provider" onclick="switchTab('provider')">⚡ Provider</button>
       </div>
-      <div class="info-card">
-        <div class="info-icon" aria-hidden="true">🔒</div>
-        <h2 class="info-title">Type-System Enforced</h2>
-        <p class="info-body">Every stage transition is validated by a typed Rust state machine. Invalid states are structurally impossible.</p>
+
+      <!-- My Projects panel -->
+      <div id="panel-mine" class="panel-body">
+        <div id="history-list" class="project-list">
+          <p class="panel-empty">No translations yet.<br>Run one to see it here!</p>
+        </div>
       </div>
-      <div class="info-card">
-        <div class="info-icon" aria-hidden="true">🔄</div>
-        <h2 class="info-title">Self-Healing</h2>
-        <p class="info-body">Compiler errors feed back into the LLM fix loop. <code>cargo check</code> is the judge — not the LLM.</p>
+
+      <!-- Community panel -->
+      <div id="panel-community" class="panel-body" hidden>
+        <div id="community-list" class="project-list">
+          <p class="panel-empty">Loading…</p>
+        </div>
+        <div class="community-cta">
+          Translated something cool?<br>
+          <a href="https://github.com" target="_blank" rel="noopener">Submit a PR</a> to add it here!
+        </div>
       </div>
-      <div class="info-card">
-        <div class="info-icon" aria-hidden="true">📦</div>
-        <h2 class="info-title">Ready to Ship</h2>
-        <p class="info-body">Output is a complete Cargo project with <code>Cargo.toml</code>, mapped dependencies, and idiomatic module layout.</p>
+
+      <!-- Provider panel -->
+      <div id="panel-provider" class="panel-body" hidden>
+        <!-- Current status -->
+        <div class="provider-status-card" id="provider-status-card">
+          <div class="provider-status-row">
+            <span class="provider-dot" id="provider-dot"></span>
+            <span class="provider-name" id="provider-name">Loading…</span>
+          </div>
+          <div class="provider-model" id="provider-model"></div>
+        </div>
+
+        <!-- Grok section -->
+        <div class="provider-section">
+          <div class="provider-section-header">
+            <span class="provider-logo-xai" aria-hidden="true">𝕏</span>
+            <span>xAI Grok</span>
+          </div>
+          <p class="provider-desc">Use your existing <strong>SuperGrok</strong> subscription — no API key needed. Reads OAuth token from <code>~/.grok/auth.json</code>.</p>
+          <div class="provider-models">
+            <span class="provider-model-chip active">grok-build</span>
+            <span class="provider-model-chip">composer-2.5</span>
+          </div>
+          <button class="btn-grok" id="btn-grok-connect" onclick="grokConnect()">
+            <span class="btn-icon">𝕏</span> Connect Grok Account
+          </button>
+          <div id="grok-device-code-box" class="device-code-box" hidden>
+            <p class="device-code-instruction">Open this URL and enter the code:</p>
+            <a class="device-code-url" id="grok-verify-url" href="#" target="_blank" rel="noopener"></a>
+            <div class="device-code-pill" id="grok-user-code"></div>
+            <p class="device-code-waiting"><span class="heartbeat-dot"></span> Waiting for approval…</p>
+          </div>
+          <div id="grok-authed-badge" class="authed-badge" hidden>
+            <span>✓</span> Connected — token auto-refreshes
+          </div>
+          <p class="provider-launch-hint">Restart server with <code>RUSTYFI_PROVIDER=grok</code> to activate.</p>
+        </div>
+
+        <!-- OpenRouter section -->
+        <div class="provider-section">
+          <div class="provider-section-header">
+            <span class="provider-logo-or" aria-hidden="true">◈</span>
+            <span>OpenRouter</span>
+          </div>
+          <p class="provider-desc">Use any model via OpenRouter with your API key.</p>
+          <div class="provider-models">
+            <span class="provider-model-chip active">gemini-2.5-flash</span>
+            <span class="provider-model-chip">gpt-4o</span>
+            <span class="provider-model-chip">claude-opus-4</span>
+          </div>
+          <p class="provider-launch-hint">Start with <code>RUSTYFI_PROVIDER=openai RUSTYFI_LLM_API_KEY=…</code></p>
+        </div>
       </div>
     </aside>
 

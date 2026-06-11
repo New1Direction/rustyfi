@@ -1,7 +1,12 @@
 [package]
 name = "rustyfi-core"
-version = "0.1.0"
-edition = "2021"
+description = "Rustyfi's typed state machine and cargo-check harness."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 serde      = { workspace = true }

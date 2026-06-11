@@ -122,7 +122,6 @@ pub enum FailureReason {
     InternalInvariant { detail: String },
 }
 
-
 /// Cargo release-profile optimization settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseConfig {
@@ -266,19 +265,19 @@ impl DiagnosticFamily {
     /// Heuristic priority for retry scheduling (higher = easier/more useful to fix first).
     pub fn retry_priority(&self) -> u8 {
         match self {
-            Self::MissingImport          => 10,
-            Self::UnusedCode             => 9,
-            Self::TypeMismatch           => 8,
-            Self::IntegerOverflow        => 8,
-            Self::PatternExhaustiveness  => 7,
-            Self::TraitBoundFailure      => 6,
-            Self::MacroError             => 5,
-            Self::AsyncMismatch          => 5,
-            Self::BorrowConflict         => 3,
-            Self::OwnershipMove          => 3,
-            Self::MissingLifetime        => 2,
-            Self::InternalCompilerError  => 0,
-            Self::Other(_)               => 4,
+            Self::MissingImport => 10,
+            Self::UnusedCode => 9,
+            Self::TypeMismatch => 8,
+            Self::IntegerOverflow => 8,
+            Self::PatternExhaustiveness => 7,
+            Self::TraitBoundFailure => 6,
+            Self::MacroError => 5,
+            Self::AsyncMismatch => 5,
+            Self::BorrowConflict => 3,
+            Self::OwnershipMove => 3,
+            Self::MissingLifetime => 2,
+            Self::InternalCompilerError => 0,
+            Self::Other(_) => 4,
         }
     }
 
@@ -317,7 +316,6 @@ impl CompilerDiagnostic {
         crate::compiler::classify_diagnostic(self)
     }
 }
-
 
 /// Severity level of a compiler diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

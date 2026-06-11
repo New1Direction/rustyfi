@@ -1,121 +1,194 @@
-# Rustyfi
+# Rustyfi 🎺🦀
 
-> **Semantic Compression to Rust** — Drop any application in, get a production-quality Rust version out.
+> **Drop a codebase in. Get a Rust head-start out.**
+> Rustyfi turns Python / TypeScript / JavaScript / Go / C / C++ / Java / C# / Ruby
+> projects into Rust crates. It treats the LLM as an *unreliable generator* and
+> `cargo check` as the *truth oracle* — so the result is verified by the compiler,
+> not vibes.
 
-Rustyfi is a deterministic Rust control-plane that orchestrates the conversion of non-Rust codebases into optimized, compiled Rust applications. It treats LLMs as *unreliable generators* and Rust's type system as the *deterministic enforcement layer*.
+It is the difference between staring at a blank `src/` and starting from a
+compiling Rust project that already mirrors your structure, types, and logic.
+
+---
+
+## What it actually does (the honest version)
+
+Translating real software between languages is not a solved problem, and Rustyfi
+does not pretend otherwise. What you get depends on what you feed it:
+
+| Your project | What comes out |
+|---|---|
+| **Pure logic** — CLIs, libraries, parsers, algorithms, data tools (standard library, no native deps) | Usually a **clean `cargo check`** — drop it, download it, it builds. See the [calculator example](examples/calculator). |
+| **Real-world apps** — web services, framework-heavy, native-library-bound | A **compiling skeleton** with your modules wired up and the type-chaos eliminated, plus an honest `NEXT_STEPS.md` punch-list of what's left (framework API mappings, native deps). |
+
+The UI never lies about which one you got. A partial run never masquerades as a
+perfect one — the result banner and `NEXT_STEPS.md` tell you exactly where you
+stand.
+
+**What no tool can do** (including this one): take an arbitrary, framework-heavy
+application and emit clean, idiomatic Rust with zero human follow-up. Closing the
+last mile on a complex app means mapping one ecosystem's semantics onto another's
+(say, a Go web framework's request context onto Axum's extractors) — that needs a
+human or a much smarter model in the loop. Rustyfi gets you most of the way and is
+honest about the rest.
+
+---
+
+## See it work: Go → Rust, clean
+
+The [`examples/calculator`](examples/calculator) project is a real lexer +
+recursive-descent parser + CLI in Go. Run it through Rustyfi and the output crate
+compiles clean and behaves identically:
+
+```bash
+# Go in:
+2 + 3 * (4 - 1)        2 ^ 10        (1 + 2) * (3 + 4)        2 +
+
+# Rust out (cargo check → 0 errors), same answers:
+11                     1024          21                       error: unexpected token: end of input
+```
+
+Two Go packages become `src/main.rs` and `src/calc/mod.rs`, Go's `iota` enum
+becomes a real Rust `enum`, and `Token`/`TokenKind` keep one canonical shape
+across files. Verified, not claimed.
 
 ---
 
 ## Quick Start
 
-### 1. Set your LLM API key
+### 1. Pick a provider
+
+Any OpenAI-compatible endpoint works. A fast, cheap default like DeepSeek is a
+great fit — bulk translation is voluminous and cheap; only the compile-fix loop
+benefits from a stronger model.
 
 ```bash
-export RUSTYFI_LLM_API_KEY="your-api-key-here"
+export RUSTYFI_LLM_API_KEY="your-api-key"
+export RUSTYFI_LLM_BASE_URL="https://api.deepseek.com"   # or OpenAI, Gemini, Cerebras, OpenRouter…
+export RUSTYFI_LLM_MODEL="deepseek-chat"
+export RUSTYFI_NO_TIER=1                                  # non-OpenRouter providers: skip tier routing
 
-# Optional — defaults to Gemini Flash via OpenAI-compat endpoint
-export RUSTYFI_LLM_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai"
-export RUSTYFI_LLM_MODEL="gemini-2.0-flash"
+# Optional but recommended — point the compile-fix loop at a reasoning model:
+export RUSTYFI_FIX_MODEL="deepseek-reasoner"
 ```
 
-For OpenAI:
+Multiple keys? Comma-separate them in `RUSTYFI_LLM_API_KEY` and Rustyfi
+round-robins across them. Prefer xAI Grok via OAuth? `export RUSTYFI_PROVIDER=grok`.
+
+### 2. Translate — pick your interface
+
+**A — the CLI** (no server, no browser; scriptable and CI-friendly):
+
 ```bash
-export RUSTYFI_LLM_BASE_URL="https://api.openai.com/v1"
-export RUSTYFI_LLM_MODEL="gpt-4o"
+# install it once…
+cargo install --path crates/rustyfi-cli      # → `rustyfi` on your PATH
+# …or run it straight from the workspace:
+cargo run -p rustyfi-cli -- ./myapp -o ./myapp-rust
+
+# then just point it at any project (a directory or a .zip):
+rustyfi ./myapp -o ./myapp-rust
 ```
 
-### 2. Build and run
+```text
+  rustyfi 🎺🦀
+  source  ./myapp
+  output  ./myapp-rust  (crate: myapp)
+
+✓ Analyzing source
+✓ Scaffolding + pinning type contract
+✓ Translating to Rust   ████████████ 12/12
+✓ Verifying with cargo check
+  · Auto-fixed 37 compile error(s) using the compiler's own suggestions (no AI needed)
+
+  ✓ compiles clean
+  · 12 translated from go · 18 file(s) written · 0 todo!() stub(s)
+
+  → cd ./myapp-rust && cargo run
+```
+
+The exit code tells the truth, so it drops straight into a script or CI:
+**`0`** = compiles clean · **`1`** = compiles with errors (a head-start +
+`NEXT_STEPS.md`) · **`2`** = failed. The crate path is printed to **stdout**;
+everything else goes to stderr. Live progress is rich in a terminal and plain
+when piped. Re-run the same command to **resume** where an interrupted run left
+off (`--fresh` to start over).
+
+**B — the web UI** (drag & drop, live stream):
 
 ```bash
-cargo build --release -p rustyfi-server
-./target/release/rustyfi-server
-# → http://localhost:7410
+cargo run -p rustyfi-server     # → http://localhost:7410
 ```
 
-Or in dev mode:
-```bash
-cargo run -p rustyfi-server
-```
-
-### 3. Use the UI
-
-1. Open **http://localhost:7410** in your browser
-2. ZIP your source project: `zip -r myapp.zip myapp/`
-3. Drag the ZIP onto the drop zone
-4. Click **Translate to Rust**
-5. Watch the pipeline progress live (SSE streaming)
-6. Click **Download Rust Project** to get the generated Cargo crate
+Open it, drag a ZIP onto the drop zone, hit **Translate to Rust**, and
+**Download Rust Project** when it's done. Same engine, same honesty — the
+terminal panel tells you whether your provider is configured before you upload.
 
 ---
 
-## Architecture
+## How it works
+
+The core idea: **let the LLM generate, let `cargo check` judge, and do everything
+the compiler can already tell you deterministically — for free.**
 
 ```
-Browser (drag & drop)
-       │  ZIP upload (multipart)
+Browser (drag & drop ZIP)
        ▼
 rustyfi-server  (Axum HTTP + SSE)
-       │
-       ├── ZIP extraction
-       └── rustyfi-engine::pipeline::run()
-                │
-                ├── [Analysis]    SourceAnalyser → ContextManifest + DependencyEdges
-                ├── [Scaffold]    Scaffolder → Cargo workspace skeleton
-                ├── [Translate]   ModuleGraph (DAG topo-sort)
-                │                  └─ per-file: SemanticChunker → chunks
-                │                               OwnershipGraph  → dependency context
-                │                               LlmClient       → Rust code
-                │                               OwnershipGraph  → record signatures
-                ├── [Verify]      cargo check → DiagnosticFamily classification
-                │                  └─ fix loop: targeted LLM repair per error family
-                └── [Package]     ZIP output
-
-rustyfi-core::Orchestrator (typed state machine — all phase transitions)
-       Idle → Parsing → Scaffolding → Translating → Verifying → Optimizing → Completed
+       │  zip-slip safe · content fingerprint (resume/reset) · bomb-capped
+       ▼
+rustyfi-engine::pipeline::run()
+   │
+   ├─ [Analysis]    walk · language detect · import edges
+   ├─ [Scaffold]    Cargo skeleton · directory-as-package module map
+   ├─ [Contract]    ⭐ one cheap call per package extracts the canonical Rust
+   │                API (every struct's full fields, enums, traits, signatures),
+   │                written once and injected into every file's prompt — so all
+   │                files agree on shapes and types BEFORE bodies are translated
+   ├─ [Translate]   DAG-scheduled, semantically chunked, parallel, rate-gated;
+   │                each file translated against the canonical contract
+   ├─ [Verify]      cargo check ──► the truth oracle
+   │     │
+   │     ├─ rustfix ⭐ harvest rustc's OWN machine-applicable suggestions and
+   │     │            apply them deterministically (zero tokens). MaybeIncorrect
+   │     │            guesses are applied only if they reduce the error count.
+   │     ├─ dep repair  strip hallucinated/unresolvable crates so resolution
+   │     │              succeeds and real errors become visible
+   │     └─ fix loop    targeted LLM repair per error family, fresh diagnostics
+   │                    each cycle, normalized + deduped on every write
+   └─ [Package]     ZIP output + NEXT_STEPS.md (Done is sent only after the ZIP
+                    is on disk — the download can never race it)
 ```
 
-### Context Window Management
+Two ideas do most of the work, and both came from asking *"what does the compiler
+already know that we're throwing away?"*
 
-Large repos trigger **context window pressure** — mitigated by three layers:
-
-| Layer | Component | What it does |
-|---|---|---|
-| **Module DAG** | `graph.rs` | Topological sort — translate dependencies before importers |
-| **Semantic Chunking** | `chunker.rs` | Split files at function/class boundaries, stay under token budget |
-| **Ownership Context** | `slicer.rs` | Inject already-translated Rust signatures into downstream prompts |
+- **The contract phase** fixes consistency *where it's created*. Translating each
+  file in isolation makes the same type come out differently in different files
+  (the classic "struct has 3 fields here, 2 fields there" bug). Pinning one
+  canonical API per package up front eliminates that entire class of error — and
+  in testing, the cheap model *with* the contract beat the expensive model
+  *without* it.
+- **rustfix** stops paying an LLM to re-derive fixes the compiler already
+  computed. `cargo check` emits structured, machine-applicable suggestions for a
+  large class of errors; Rustyfi applies them directly. On a real run it fixed
+  **200+ errors deterministically, before the model touched anything.**
 
 ---
 
-## Workspace Layout
+## Why it's trustworthy
 
-```
-crates/
-├── rustyfi-core/       # Typed state machine + compiler layer
-│   ├── state.rs        # RustyfiState + per-state context + DiagnosticFamily
-│   ├── events.rs       # StateEvent enum — only way to drive transitions
-│   ├── transitions.rs  # Orchestrator with exhaustive match table
-│   ├── context.rs      # ContextManifest ingestion contract
-│   ├── compiler.rs     # cargo check harness + JSON diagnostic parsing
-│   └── errors.rs       # TransitionError, CompilerError, ManifestError
-│
-├── rustyfi-engine/     # Pipeline orchestration + LLM + scaffolding
-│   ├── analysis.rs     # Source directory walk + language detection + edge inference
-│   ├── checkpoint.rs   # Resumable stage checkpoints (JSON, per-phase)
-│   ├── chunker.rs      # SemanticChunker — token-budget file splitting (8 languages)
-│   ├── graph.rs        # ModuleGraph — DAG + Kahn's topological scheduler
-│   ├── llm.rs          # Blocking LLM client + context-aware prompt builders
-│   ├── pipeline.rs     # End-to-end run() — graph-scheduled, checkpoint-driven
-│   ├── scaffold.rs     # Cargo project generator + ZIP packager
-│   └── slicer.rs       # OwnershipGraph — symbol → Rust signature accumulator
-│
-└── rustyfi-server/     # Axum HTTP server
-    └── main.rs         # /health, /api/translate (SSE), /api/download/:name
-
-web/
-├── index.html          # Drop zone UI
-├── style.css           # Dark glassmorphism design system
-└── app.js              # SSE client, progress tracker, terminal log
-```
+- **`cargo check` is the oracle**, not the model — every claim of "it compiles" is
+  the compiler's, not the LLM's.
+- **Honest output** — if files fell back to stubs or the build isn't clean, the UI
+  and `NEXT_STEPS.md` say so plainly.
+- **Deterministic where possible** — module wiring, dedup, dependency repair, and
+  rustfix are exact, repeatable passes, not model guesses.
+- **Resumable by design** — every phase checkpoints; identical re-uploads resume,
+  changed re-uploads reset (content fingerprint).
+- **Fail fast on config** — a missing/invalid API key aborts immediately with an
+  actionable message instead of stubbing out every file.
+- **Safe by construction** — edits are confined to the generated crate's `src/`; a
+  dependency's cached source is never touched.
 
 ---
 
@@ -123,37 +196,67 @@ web/
 
 | Variable | Default | Description |
 |---|---|---|
-| `RUSTYFI_LLM_API_KEY` | *(required)* | LLM provider API key |
-| `RUSTYFI_LLM_BASE_URL` | Gemini OpenAI-compat | Any OpenAI-compatible base URL |
-| `RUSTYFI_LLM_MODEL` | `gemini-2.0-flash` | Model name |
+| `RUSTYFI_LLM_API_KEY` | *(required for openai)* | API key(s) — comma-separate for round-robin |
+| `RUSTYFI_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible base URL |
+| `RUSTYFI_LLM_MODEL` | `google/gemini-2.5-flash` | Translation model ID |
+| `RUSTYFI_FIX_MODEL` | *(falls back to `RUSTYFI_LLM_MODEL`)* | **Stronger model for the compile-fix loop** — translation is cheap, repair is precision work |
+| `RUSTYFI_FIX_BASE_URL` / `RUSTYFI_FIX_API_KEY` / `RUSTYFI_FIX_PROVIDER` | *(fall back to translation config)* | Point the fix loop at a different endpoint entirely |
+| `RUSTYFI_FIX_TIMEOUT` | `180` | Per-request timeout for fixes (reasoning models think longer) |
+| `RUSTYFI_PROVIDER` | `openai` | `grok` / `xai` to use Grok OAuth instead of an API key |
+| `RUSTYFI_VERIFY_RETRIES` | `4` | Max compile-fix cycles |
+| `RUSTYFI_RPM` | `25` | Global requests-per-minute gate across all workers |
+| `RUSTYFI_PARALLEL` | `16` | Files translated concurrently |
+| `RUSTYFI_CHUNK_TOKENS` | `5000` | Max tokens per semantic chunk |
+| `RUSTYFI_NO_TIER` | *(unset)* | Disable tiered model routing (use for non-OpenRouter providers) |
+| `RUSTYFI_NO_STUB` | *(unset)* | Translate test/fixture/generated files too |
 | `PORT` | `7410` | HTTP server port |
 | `RUST_LOG` | `rustyfi_server=info` | Tracing filter |
-| `RUSTYFI_CHUNK_TOKENS` | `5000` | Max tokens per semantic chunk |
 
 ---
 
-## Supported Source Languages
-
-Python · TypeScript · JavaScript · Go · C · C++ · Java · C# · Ruby
-
----
-
-## Design Constraints
-
-- **No silent state mutation** — all transitions go through `Orchestrator::transition()`
-- **Exhaustive match, no `_ => {}`** — every state/event combination is explicitly handled
-- **LLM is just a generator** — `cargo check` is the truth oracle, not the model
-- **Retry loops are ceiling-bounded** — `translate_retries` and `verify_retries` in `RunConfig`
-- **Blocking HTTP for LLM** — deterministic orchestration stays synchronous; only the server is async
-- **Resumable by design** — every phase writes a checkpoint; interrupted runs resume from the last completed file
-- **DiagnosticFamily-targeted repair** — fix loop classifies errors and sends context-aware prompts per family
-- **Graph-scheduled translation** — dependencies translated before their importers; type-compatible interfaces guaranteed
-
----
-
-## Test Coverage
+## Workspace Layout
 
 ```
-cargo test --workspace   # 44 tests, 0 failures
-cargo clippy --workspace -- -D warnings   # zero lints
+crates/
+├── rustyfi-core/       # Typed state machine + cargo-check harness
+│   ├── state.rs · events.rs · transitions.rs   # Orchestrator (exhaustive match)
+│   ├── context.rs · compiler.rs · errors.rs    # manifest + diagnostic parsing
+│
+├── rustyfi-engine/     # Pipeline orchestration + LLM + scaffolding
+│   ├── analysis.rs     # walk, language detect, import resolution
+│   ├── checkpoint.rs   # resumable per-phase checkpoints (JSON)
+│   ├── chunker.rs      # SemanticChunker — token-budget file splitting
+│   ├── graph.rs        # ModuleGraph — DAG + topological scheduler
+│   ├── scaffold.rs     # Cargo generator, directory-as-package layout, ZIP
+│   ├── contract*       # canonical per-package Rust API (in pipeline.rs/llm.rs)
+│   ├── slicer.rs       # signature extraction / contract splitting
+│   ├── deps.rs         # curated dependency auto-detection (allowlist-only)
+│   ├── rustfix.rs      # apply rustc's own machine-applicable suggestions
+│   ├── dedup_items.rs  # syn-based duplicate-definition removal
+│   ├── llm.rs          # blocking LLM client (OpenAI-compat + Grok OAuth)
+│   └── pipeline.rs     # end-to-end run() — phased, checkpointed, parallel
+│
+├── rustyfi-server/     # Axum HTTP server — /health /api/translate (SSE) /api/download/:name
+└── rustyfi-cli/        # `rustyfi` command — drives the engine directly, no server
+    ├── main.rs         # args, run, exit codes, summary
+    ├── progress.rs     # TTY-aware live progress (rich interactive / plain piped)
+    └── unzip.rs        # zip-slip-safe archive in/out
+
+web/                    # Drop-zone UI: live SSE progress, honest result banner
+examples/calculator/    # Go → clean Rust, verified
 ```
+
+---
+
+## Tests
+
+```bash
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+```
+
+---
+
+## Easter eggs
+
+There are at least three. The trombone knows what it did. 🎺

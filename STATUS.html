@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rustyfi — State of the Machine</title>
+<style>
+  :root {
+    /* surfaces — warm near-black, brass & rust accents */
+    --bg:        oklch(15% 0.012 65);
+    --bg-2:      oklch(18% 0.014 60);
+    --surface:   oklch(22% 0.014 62);
+    --surface-2: oklch(26% 0.016 62);
+    --line:      oklch(34% 0.018 62);
+    --text:      oklch(93% 0.012 85);
+    --muted:     oklch(68% 0.018 72);
+    --faint:     oklch(54% 0.016 70);
+
+    --rust:   oklch(69% 0.19 42);   /* ferris orange */
+    --brass:  oklch(82% 0.13 86);   /* trombone gold */
+    --green:  oklch(75% 0.16 152);  /* clean compile */
+    --amber:  oklch(80% 0.15 78);   /* partial */
+    --blue:   oklch(74% 0.12 235);
+
+    --text-hero:  clamp(2.6rem, 1.2rem + 5.4vw, 5.5rem);
+    --text-h2:    clamp(1.3rem, 1rem + 1.1vw, 1.9rem);
+    --space:      clamp(3rem, 2rem + 4vw, 6rem);
+    --ease:       cubic-bezier(0.16, 1, 0.3, 1);
+    --radius:     18px;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(120% 80% at 85% -10%, oklch(28% 0.05 45 / 0.55), transparent 60%),
+      radial-gradient(90% 60% at 5% 0%, oklch(26% 0.04 90 / 0.4), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.01em;
+  }
+  /* film grain */
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.045;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .wrap { position: relative; z-index: 1; max-width: 1080px; margin: 0 auto; padding: clamp(1.4rem, 3vw, 3rem); }
+
+  code, .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", monospace; }
+
+  /* ── hero ───────────────────────────────────────────── */
+  header.hero { padding: var(--space) 0 calc(var(--space) * 0.5); }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 0.55rem;
+    font: 600 0.8rem/1 ui-monospace, monospace; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--brass); padding: 0.5rem 0.85rem; border: 1px solid var(--line); border-radius: 100px;
+    background: oklch(22% 0.02 70 / 0.5);
+  }
+  .eyebrow .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 0 var(--green); animation: pulse 2.6s var(--ease) infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 oklch(75% 0.16 152 / 0.5); } 70%,100% { box-shadow: 0 0 0 9px transparent; } }
+  h1 {
+    font-size: var(--text-hero); line-height: 0.95; letter-spacing: -0.035em; font-weight: 800;
+    margin: 1.4rem 0 0.5rem;
+  }
+  h1 .grad { background: linear-gradient(96deg, var(--brass), var(--rust) 70%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { font-size: clamp(1.05rem, 0.95rem + 0.6vw, 1.35rem); color: var(--muted); max-width: 56ch; margin: 0.4rem 0 0; }
+  .stamp { margin-top: 1.6rem; font: 500 0.85rem/1 ui-monospace, monospace; color: var(--faint); display: flex; gap: 1.4rem; flex-wrap: wrap; }
+  .stamp b { color: var(--text); font-weight: 600; }
+
+  /* ── verdict banner ─────────────────────────────────── */
+  .verdict {
+    margin-top: 2.4rem; display: grid; grid-template-columns: auto 1fr; gap: 1.2rem; align-items: center;
+    padding: 1.3rem 1.5rem; border: 1px solid var(--line); border-radius: var(--radius);
+    background: linear-gradient(180deg, oklch(24% 0.02 70 / 0.7), oklch(20% 0.016 65 / 0.7));
+    box-shadow: 0 20px 50px -30px oklch(0% 0 0 / 0.9), inset 0 1px 0 oklch(100% 0 0 / 0.04);
+  }
+  .verdict .ring {
+    width: 58px; height: 58px; border-radius: 50%; display: grid; place-items: center;
+    background: conic-gradient(var(--green) 0 78%, oklch(30% 0.02 70) 78% 100%);
+    font: 800 0.95rem ui-monospace, monospace; color: var(--bg);
+  }
+  .verdict .ring span { width: 44px; height: 44px; border-radius: 50%; background: var(--bg-2); display:grid; place-items:center; color: var(--green); }
+  .verdict h2 { margin: 0; font-size: 1.05rem; letter-spacing: -0.01em; }
+  .verdict p { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.93rem; }
+
+  /* ── section ────────────────────────────────────────── */
+  section { margin-top: var(--space); }
+  .sec-head { display: flex; align-items: baseline; gap: 0.8rem; margin-bottom: 1.4rem; }
+  .sec-head h2 { font-size: var(--text-h2); letter-spacing: -0.025em; margin: 0; font-weight: 750; }
+  .sec-head .n { font: 600 0.8rem ui-monospace, monospace; color: var(--rust); }
+  .sec-head .rule { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+
+  /* ── bento grid ─────────────────────────────────────── */
+  .bento { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1rem; }
+  .card {
+    grid-column: span 6; padding: 1.4rem 1.5rem; border: 1px solid var(--line); border-radius: var(--radius);
+    background: linear-gradient(180deg, oklch(23% 0.014 64 / 0.75), oklch(20% 0.013 62 / 0.75));
+    transition: transform 0.4s var(--ease), border-color 0.4s var(--ease), box-shadow 0.4s var(--ease);
+    will-change: transform;
+  }
+  .card:hover { transform: translateY(-4px); border-color: oklch(46% 0.04 60); box-shadow: 0 26px 50px -34px oklch(0% 0 0 / 0.9); }
+  .card.wide { grid-column: span 12; }
+  .card.third { grid-column: span 4; }
+  .card .kicker { font: 600 0.72rem/1 ui-monospace, monospace; letter-spacing: 0.16em; text-transform: uppercase; color: var(--faint); }
+  .card h3 { margin: 0.5rem 0 0.4rem; font-size: 1.15rem; letter-spacing: -0.02em; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.92rem; }
+  .big { font: 800 clamp(2.2rem, 1.4rem + 2.6vw, 3.2rem)/1 ui-monospace, monospace; letter-spacing: -0.03em; }
+  .big.green { color: var(--green); } .big.rust { color: var(--rust); } .big.brass { color: var(--brass); }
+  .sub { color: var(--faint); font-size: 0.82rem; margin-top: 0.3rem; }
+
+  /* ── head-to-head bars ──────────────────────────────── */
+  .h2h { display: grid; gap: 0.85rem; margin-top: 0.4rem; }
+  .row { display: grid; grid-template-columns: 230px 1fr 52px; gap: 0.9rem; align-items: center; }
+  .row .lbl { font-size: 0.86rem; color: var(--muted); }
+  .row .lbl b { color: var(--text); font-weight: 600; }
+  .track { height: 26px; border-radius: 8px; background: oklch(28% 0.012 62 / 0.6); overflow: hidden; position: relative; }
+  .bar { height: 100%; border-radius: 8px; transform-origin: left; animation: grow 1s var(--ease) both; }
+  @keyframes grow { from { transform: scaleX(0); } }
+  .bar.b117 { width: 100%;  background: linear-gradient(90deg, oklch(55% 0.16 30), oklch(62% 0.18 35)); }
+  .bar.b63  { width: 54%;   background: linear-gradient(90deg, oklch(60% 0.15 55), oklch(70% 0.15 70)); }
+  .bar.b46  { width: 39%;   background: linear-gradient(90deg, var(--amber), var(--brass)); }
+  .bar.b0   { width: 4%;    background: linear-gradient(90deg, var(--green), oklch(80% 0.16 155)); }
+  .row .val { font: 700 1rem ui-monospace, monospace; text-align: right; }
+  .row.best .lbl b { color: var(--brass); }
+  .legend { margin-top: 1rem; font-size: 0.8rem; color: var(--faint); }
+
+  /* ── pipeline pills ─────────────────────────────────── */
+  .pills { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.4rem; }
+  .pill { font: 600 0.78rem ui-monospace, monospace; padding: 0.4rem 0.7rem; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); background: oklch(24% 0.014 64 / 0.6); }
+  .pill.new { color: var(--bg); background: linear-gradient(96deg, var(--brass), var(--rust)); border-color: transparent; }
+
+  /* ── demo terminal ──────────────────────────────────── */
+  .term { margin-top: 1rem; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: oklch(13% 0.01 60); }
+  .term .bar-top { display: flex; gap: 0.4rem; padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--line); align-items: center; }
+  .term .bar-top i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .term .bar-top .t { margin-left: 0.6rem; font: 600 0.76rem ui-monospace, monospace; color: var(--faint); }
+  .term pre { margin: 0; padding: 1rem 1.1rem; font: 0.86rem/1.7 ui-monospace, monospace; overflow-x: auto; }
+  .term .c-in  { color: var(--blue); }
+  .term .c-out { color: var(--green); }
+  .term .c-cmt { color: var(--faint); }
+  .term .c-err { color: var(--rust); }
+
+  ul.clean { list-style: none; padding: 0; margin: 0.6rem 0 0; display: grid; gap: 0.55rem; }
+  ul.clean li { padding-left: 1.5rem; position: relative; color: var(--muted); font-size: 0.92rem; }
+  ul.clean li::before { content: "▸"; position: absolute; left: 0; color: var(--rust); }
+  ul.clean li b { color: var(--text); font-weight: 600; }
+
+  .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+
+  footer { margin: var(--space) 0 2rem; padding-top: 1.6rem; border-top: 1px solid var(--line); color: var(--faint); font-size: 0.85rem; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.6rem; }
+  footer b { color: var(--muted); }
+
+  @media (max-width: 760px) {
+    .card, .card.third { grid-column: span 12; }
+    .row { grid-template-columns: 120px 1fr 46px; }
+    .row .lbl { font-size: 0.78rem; }
+    .twocol { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <span class="eyebrow"><span class="dot"></span> Build green · 90 tests passing</span>
+    <h1>Rustyfi: <span class="grad">state of the machine</span> 🎺🦀</h1>
+    <p class="lede">Drop a codebase in, get a Rust head-start out. Here's exactly where the machine stands — verified, not vibes.</p>
+    <div class="stamp">
+      <span>STATUS · <b>shippable</b></span>
+      <span>DEMO · <b>compiles clean</b></span>
+      <span>ORACLE · <b>cargo check</b></span>
+    </div>
+
+    <div class="verdict">
+      <div class="ring"><span>✓</span></div>
+      <div>
+        <h2>The product is where you can ship it — with honest framing.</h2>
+        <p>Pure-logic projects compile clean today. Complex apps get a compiling skeleton plus an honest punch-list. The win is positioning around the real magic, not promising what no transpiler can deliver.</p>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── DEMO ───────────────────────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="n">01</span><h2>The demo that just works</h2><span class="rule"></span></div>
+    <div class="bento">
+      <div class="card third">
+        <div class="kicker">Go → Rust · verified</div>
+        <div class="big green">0</div>
+        <div class="sub">cargo check errors</div>
+        <p style="margin-top:0.8rem">A real lexer + recursive-descent parser + CLI. 3 files, 2 packages. <code>iota</code> enum → Rust <code>enum</code>; types kept consistent across files by the contract phase.</p>
+      </div>
+      <div class="card" style="grid-column: span 8;">
+        <div class="kicker">examples/calculator — translated Rust binary, running</div>
+        <div class="term">
+          <div class="bar-top"><i style="background:var(--rust)"></i><i style="background:var(--amber)"></i><i style="background:var(--green)"></i><span class="t">calculator · cargo run</span></div>
+<pre><span class="c-in">$ calculator "2 + 3 * (4 - 1)"</span>
+<span class="c-out">11</span>
+<span class="c-in">$ calculator "2 ^ 10"</span>
+<span class="c-out">1024</span>
+<span class="c-in">$ calculator "(1 + 2) * (3 + 4)"</span>
+<span class="c-out">21</span>
+<span class="c-in">$ calculator "2 +"</span>
+<span class="c-err">error: unexpected token: end of input</span>  <span class="c-cmt"># exit 1</span></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── HEAD TO HEAD ───────────────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="n">02</span><h2>Hard case: a real Go web service</h2><span class="rule"></span></div>
+    <div class="card wide">
+      <div class="kicker">prompt-cache · 23 Go files · cargo errors remaining (lower is better)</div>
+      <div class="h2h" style="margin-top:1rem">
+        <div class="row">
+          <div class="lbl"><b>chat</b> · no contract, no rustfix</div>
+          <div class="track"><div class="bar b117"></div></div>
+          <div class="val">117</div>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>reasoner</b> + rustfix</div>
+          <div class="track"><div class="bar b63"></div></div>
+          <div class="val">63</div>
+        </div>
+        <div class="row best">
+          <div class="lbl"><b>chat + contract + rustfix</b></div>
+          <div class="track"><div class="bar b46"></div></div>
+          <div class="val">46</div>
+        </div>
+        <div class="row">
+          <div class="lbl"><b>the calculator demo</b></div>
+          <div class="track"><div class="bar b0"></div></div>
+          <div class="val">0</div>
+        </div>
+      </div>
+      <p class="legend">The <b style="color:var(--brass)">cheap model with the contract beat the expensive model without it</b> (46 vs 63) — fixing consistency at translation time beats patching it afterward. Remaining errors are genuine framework-semantics gaps (gin&nbsp;→&nbsp;axum), not structural chaos. Results are a distribution, not a fixed number — more compute isn't monotonically better.</p>
+    </div>
+  </section>
+
+  <!-- ── WHAT GOT BUILT ─────────────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="n">03</span><h2>What the machine learned this round</h2><span class="rule"></span></div>
+    <div class="bento">
+      <div class="card">
+        <div class="kicker">⭐ Contract phase</div>
+        <h3>One canonical API per package</h3>
+        <p>Before bodies are translated, one cheap call pins each package's exact types & signatures — so every file agrees on shapes. Kills the cross-file E0609 / E0308 / E0061 cluster at its source.</p>
+      </div>
+      <div class="card">
+        <div class="kicker">⭐ rustfix</div>
+        <h3>The compiler fixes its own errors</h3>
+        <p><span class="big rust" style="font-size:1.6rem">200+</span> <span class="sub" style="display:inline">errors fixed deterministically, zero tokens</span> — harvesting rustc's machine-applicable suggestions, with MaybeIncorrect guesses kept only if they reduce the count.</p>
+      </div>
+      <div class="card wide">
+        <div class="kicker">The full deterministic spine — no LLM where the compiler already knows the answer</div>
+        <div class="pills">
+          <span class="pill new">contract phase</span>
+          <span class="pill new">rustfix harvest</span>
+          <span class="pill">directory-as-package modules</span>
+          <span class="pill">syn duplicate-dedup</span>
+          <span class="pill">curated dep auto-add</span>
+          <span class="pill">hallucinated-dep strip</span>
+          <span class="pill">module-collision guard</span>
+          <span class="pill">fix-loop normalize</span>
+          <span class="pill">fingerprint resume</span>
+          <span class="pill">honest result banner</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── HONEST READ ────────────────────────────────── -->
+  <section>
+    <div class="sec-head"><span class="n">04</span><h2>The honest read</h2><span class="rule"></span></div>
+    <div class="twocol">
+      <div class="card" style="grid-column:auto">
+        <div class="kicker" style="color:var(--green)">Where it's genuinely there</div>
+        <ul class="clean">
+          <li><b>UX & polish</b> — drag-drop, live progress, honest banner, easter eggs</li>
+          <li><b>Pipeline robustness</b> — no hangs, lies, or corruption; resumable</li>
+          <li><b>Pure-logic projects</b> — reliably compile clean (see demo)</li>
+          <li><b>Trust</b> — cargo is the oracle; it never overstates results</li>
+        </ul>
+      </div>
+      <div class="card" style="grid-column:auto">
+        <div class="kicker" style="color:var(--amber)">Where the ceiling is real</div>
+        <ul class="clean">
+          <li><b>Complex apps</b> — a head-start, not a clean compile</li>
+          <li><b>Framework semantics</b> — gin → axum needs human/smarter model</li>
+          <li><b>Run-to-run variance</b> — outputs are a distribution (46–111)</li>
+          <li><b>No tool clears this</b> — it's the frontier, not a missing pass</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>Rustyfi · LLM as generator, <b>cargo check</b> as oracle · 90 tests green</span>
+    <span>The trombone knows what it did. 🎺</span>
+  </footer>
+
+</div>
+</body>
+</html>

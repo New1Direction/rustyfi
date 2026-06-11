@@ -1,0 +1,42 @@
+name: release
+
+# Tag a release to build and publish cross-platform `rustyfi` binaries:
+#   git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds `rustyfi` for the target (installing the toolchain target and any
+      # cross-linker), archives it (tar.gz / zip), checksums it, and uploads it
+      # to the GitHub Release for this tag.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: rustyfi
+          target: ${{ matrix.target }}
+          archive: rustyfi-$tag-$target
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}

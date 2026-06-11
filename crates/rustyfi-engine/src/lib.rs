@@ -1,9 +1,12 @@
 pub mod analysis;
 pub mod checkpoint;
 pub mod chunker;
+pub mod dedup_items;
+pub mod deps;
 pub mod graph;
 pub mod llm;
 pub mod pipeline;
+pub mod rustfix;
 pub mod scaffold;
 pub mod slicer;
 

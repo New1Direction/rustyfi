@@ -54,10 +54,13 @@ impl CheckpointStore {
     /// Create (or reopen) a checkpoint store rooted at `run_dir`.
     pub fn new(run_dir: &Path) -> Result<Self, EngineError> {
         let checkpoints_dir = run_dir.join("checkpoints");
-        let artifacts_dir   = run_dir.join("artifacts");
+        let artifacts_dir = run_dir.join("artifacts");
         fs::create_dir_all(&checkpoints_dir).map_err(|e| EngineError::Io(e.to_string()))?;
         fs::create_dir_all(&artifacts_dir).map_err(|e| EngineError::Io(e.to_string()))?;
-        Ok(Self { checkpoints_dir, artifacts_dir })
+        Ok(Self {
+            checkpoints_dir,
+            artifacts_dir,
+        })
     }
 
     /// Write a typed checkpoint for `phase`.
@@ -77,7 +80,7 @@ impl CheckpointStore {
         let path = self.checkpoint_path(phase);
         let json = fs::read_to_string(&path).ok()?;
         match serde_json::from_str(&json) {
-            Ok(v)  => Some(v),
+            Ok(v) => Some(v),
             Err(e) => {
                 warn!("Failed to deserialize checkpoint `{phase}`: {e} — will re-run phase");
                 None
@@ -133,7 +136,14 @@ impl CheckpointStore {
 
 /// Canonical phase ordering (used by `invalidate_from`).
 fn phase_order() -> &'static [&'static str] {
-    &["analysis", "scaffold", "translation", "verification", "packaging"]
+    &[
+        "analysis",
+        "scaffold",
+        "contract",
+        "translation",
+        "verification",
+        "packaging",
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -143,38 +153,57 @@ fn phase_order() -> &'static [&'static str] {
 /// Serializable output of the Analysis phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisCheckpoint {
-    pub source_dir:           PathBuf,
-    pub crate_name:           String,
-    pub language:             String,
-    pub target_paths:         Vec<PathBuf>,
+    pub source_dir: PathBuf,
+    pub crate_name: String,
+    pub language: String,
+    pub target_paths: Vec<PathBuf>,
     pub inferred_entrypoints: Vec<PathBuf>,
     /// Serialised dependency edges (from → to).
-    pub edges:                Vec<EdgeRecord>,
-    pub warning_count:        usize,
-    pub produced_at:          String,
+    pub edges: Vec<EdgeRecord>,
+    pub warning_count: usize,
+    pub produced_at: String,
 }
 
 /// Serializable output of the Scaffold phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScaffoldCheckpoint {
-    pub workspace_path:   PathBuf,
-    pub crate_name:       String,
-    pub module_plan:      Vec<String>,
+    pub workspace_path: PathBuf,
+    pub crate_name: String,
+    pub module_plan: Vec<String>,
+}
+
+/// The canonical Rust API surface for one source package.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PackageContract {
+    pub root_segment: String,
+    pub package: String,
+    pub is_entrypoint: bool,
+    /// Authoritative `pub struct`/`enum`/`trait`/`type` definitions (full
+    /// bodies) — written once into the package's `mod.rs`.
+    pub data_surface: String,
+    /// `pub fn`/method signature lines — injected into body prompts as context.
+    pub signatures: String,
+}
+
+/// Serializable output of the Contract phase: one entry per package.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ContractCheckpoint {
+    pub contracts: Vec<PackageContract>,
 }
 
 /// The translation result for a single source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileTranslation {
     /// Absolute path to the source file.
-    pub source_path:    PathBuf,
+    pub source_path: PathBuf,
     /// Absolute path to the generated `.rs` file.
-    pub rust_path:      PathBuf,
+    pub rust_path: PathBuf,
     /// Module name (stem of `rust_path`).
-    pub module_name:    String,
+    pub module_name: String,
     /// How many LLM attempts were needed.
-    pub attempt_count:  u32,
+    pub attempt_count: u32,
     /// `true` if the LLM succeeded; `false` if a placeholder was written.
-    pub succeeded:      bool,
+    pub succeeded: bool,
 }
 
 /// Serializable output of the Translation phase.
@@ -198,25 +227,25 @@ pub struct TranslationCheckpoint {
 /// Classification summary for one fix cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FixCycleSummary {
-    pub attempt:          u32,
-    pub error_count:      usize,
+    pub attempt: u32,
+    pub error_count: usize,
     /// The dominant `DiagnosticFamily` names seen in this cycle.
     pub dominant_families: Vec<String>,
-    pub resolved:         bool,
+    pub resolved: bool,
 }
 
 /// Serializable output of the Verification phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationCheckpoint {
-    pub exit_clean:      bool,
-    pub fix_cycles:      Vec<FixCycleSummary>,
+    pub exit_clean: bool,
+    pub fix_cycles: Vec<FixCycleSummary>,
     pub final_error_count: usize,
 }
 
 /// Serializable output of the Packaging phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackagingCheckpoint {
-    pub zip_path:    PathBuf,
-    pub zip_bytes:   usize,
-    pub crate_name:  String,
+    pub zip_path: PathBuf,
+    pub zip_bytes: usize,
+    pub crate_name: String,
 }

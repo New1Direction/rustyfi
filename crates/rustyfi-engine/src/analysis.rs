@@ -31,6 +31,7 @@ impl SourceAnalyser {
             "node_modules",
             ".git",
             "__pycache__",
+            "__MACOSX",
             ".venv",
             "venv",
             "dist",
@@ -45,8 +46,15 @@ impl SourceAnalyser {
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
+                // depth 0 is the workspace root itself — never filter it,
+                // even if the directory happens to have a dotted name.
+                if e.depth() == 0 {
+                    return true;
+                }
                 let name = e.file_name().to_string_lossy();
-                !skip_dirs.iter().any(|s| *s == name.as_ref())
+                // Skip hidden entries and macOS AppleDouble files (`._foo.py`)
+                // which would otherwise be detected as source files.
+                !name.starts_with('.') && !skip_dirs.iter().any(|s| *s == name.as_ref())
             })
         {
             let entry = match entry {
@@ -231,12 +239,14 @@ fn is_likely_entrypoint(path: &Path, lang: &SourceLanguage) -> bool {
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
     match lang {
-        SourceLanguage::Python => stem == "main" || stem == "__main__" || stem == "app" || stem == "run",
+        SourceLanguage::Python => {
+            stem == "main" || stem == "__main__" || stem == "app" || stem == "run"
+        }
         SourceLanguage::Go => stem == "main",
         SourceLanguage::JavaScript | SourceLanguage::TypeScript => {
             stem == "index" || stem == "main" || stem == "server" || stem == "app"
         }
-        SourceLanguage::Java => stem == "Main" || stem == "App" || stem == "Application",
+        SourceLanguage::Java => stem == "main" || stem == "app" || stem == "application",
         _ => stem == "main",
     }
 }
@@ -246,6 +256,9 @@ fn is_likely_entrypoint(path: &Path, lang: &SourceLanguage) -> bool {
 // ---------------------------------------------------------------------------
 
 fn infer_edges(targets: &[SourceTarget], root: &Path) -> Vec<DependencyEdge> {
+    use std::collections::HashSet;
+    let known: HashSet<&Path> = targets.iter().map(|t| t.path.as_path()).collect();
+
     let mut edges = Vec::new();
     for target in targets {
         let Ok(text) = std::fs::read_to_string(&target.path) else {
@@ -254,12 +267,20 @@ fn infer_edges(targets: &[SourceTarget], root: &Path) -> Vec<DependencyEdge> {
         for line in text.lines().take(100) {
             let trimmed = line.trim();
             if let Some(symbol) = extract_import(trimmed, &target.language) {
-                let is_internal = symbol.starts_with('.') || symbol.starts_with('/');
+                // Only record edges that resolve to a real file in this
+                // project — external packages (requests, lodash, …) would
+                // otherwise pollute the DAG with phantom nodes.
+                let Some(to) = resolve_import(&symbol, target, root, &known) else {
+                    continue;
+                };
+                if to == target.path {
+                    continue; // self-import, ignore
+                }
                 edges.push(DependencyEdge {
                     from: target.path.clone(),
-                    to: root.join(&symbol),
+                    to,
                     import_symbol: symbol,
-                    is_internal,
+                    is_internal: true,
                 });
             }
         }
@@ -267,13 +288,102 @@ fn infer_edges(targets: &[SourceTarget], root: &Path) -> Vec<DependencyEdge> {
     edges
 }
 
+/// Resolve an import symbol to an actual source file in the project.
+/// Conservative: returns `None` for anything that doesn't map to a known file.
+fn resolve_import(
+    symbol: &str,
+    target: &SourceTarget,
+    root: &Path,
+    known: &std::collections::HashSet<&Path>,
+) -> Option<PathBuf> {
+    let file_dir = target.path.parent().unwrap_or(root);
+    let pick =
+        |candidates: Vec<PathBuf>| candidates.into_iter().find(|c| known.contains(c.as_path()));
+
+    match &target.language {
+        SourceLanguage::Python => {
+            // `import a.b` / `from a.b import x` → a/b.py or a/b/__init__.py,
+            // tried relative to the file's directory and the project root.
+            // `from . import x` anchors at the file's dir; each extra leading
+            // dot climbs one parent (`..pkg` → ../pkg).
+            let rel = symbol.trim_start_matches('.');
+            let as_path = rel.replace('.', "/");
+            let bases = if symbol.starts_with('.') {
+                let dots = symbol.len() - rel.len();
+                let mut base = file_dir.to_path_buf();
+                for _ in 1..dots {
+                    base.pop();
+                }
+                vec![base]
+            } else {
+                vec![file_dir.to_path_buf(), root.to_path_buf()]
+            };
+            let mut candidates = Vec::new();
+            for base in bases {
+                candidates.push(base.join(format!("{as_path}.py")));
+                candidates.push(base.join(&as_path).join("__init__.py"));
+            }
+            pick(candidates)
+        }
+        SourceLanguage::JavaScript | SourceLanguage::TypeScript => {
+            // Only relative specifiers can be project files.
+            if !symbol.starts_with('.') {
+                return None;
+            }
+            let base = file_dir.join(symbol);
+            let mut candidates = vec![base.clone()];
+            for ext in ["ts", "tsx", "mts", "js", "mjs", "cjs", "jsx"] {
+                candidates.push(PathBuf::from(format!("{}.{ext}", base.display())));
+                candidates.push(base.join(format!("index.{ext}")));
+            }
+            // Normalise `a/./b` and `a/x/../b` segments so set lookup works.
+            pick(candidates.into_iter().map(normalise_path).collect())
+        }
+        SourceLanguage::C | SourceLanguage::Cpp => {
+            // `#include "foo.h"` → sibling or root-relative file.
+            pick(
+                vec![file_dir.join(symbol), root.join(symbol)]
+                    .into_iter()
+                    .map(normalise_path)
+                    .collect(),
+            )
+        }
+        _ => None,
+    }
+}
+
+/// Resolve `.` and `..` components lexically (no filesystem access).
+fn normalise_path(p: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn extract_import(line: &str, lang: &SourceLanguage) -> Option<String> {
     match lang {
         SourceLanguage::Python => {
             if line.starts_with("import ") {
-                Some(line.strip_prefix("import ")?.split_whitespace().next()?.to_string())
+                Some(
+                    line.strip_prefix("import ")?
+                        .split_whitespace()
+                        .next()?
+                        .to_string(),
+                )
             } else if line.starts_with("from ") {
-                Some(line.strip_prefix("from ")?.split_whitespace().next()?.to_string())
+                Some(
+                    line.strip_prefix("from ")?
+                        .split_whitespace()
+                        .next()?
+                        .to_string(),
+                )
             } else {
                 None
             }
@@ -294,6 +404,13 @@ fn extract_import(line: &str, lang: &SourceLanguage) -> Option<String> {
             } else {
                 None
             }
+        }
+        SourceLanguage::C | SourceLanguage::Cpp => {
+            // Only quoted includes — angle brackets are system headers.
+            let rest = line.strip_prefix("#include")?.trim_start();
+            let inner = rest.strip_prefix('"')?;
+            let end = inner.find('"')?;
+            Some(inner[..end].to_string())
         }
         _ => None,
     }
