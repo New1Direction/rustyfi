@@ -108,7 +108,9 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
         let _ = fs::remove_dir_all(&work);
     }
 
-    print_banner(&source_dir, &output, &name);
+    if !cli.json {
+        print_banner(&source_dir, &output, &name);
+    }
 
     let rich = !cli.quiet && !cli.json && std::io::stderr().is_terminal();
     let mut ui = progress::Ui::new(rich);
@@ -245,7 +247,7 @@ fn build_json_summary(
 ) -> serde_json::Value {
     serde_json::json!({
         "crate_name": r.crate_name,
-        "crate_path": output.display().to_string(),
+        "crate_path": output.to_string_lossy(),
         "language": r.language,
         "files_total": r.files_translated + r.files_failed,
         "files_translated": r.files_translated,
