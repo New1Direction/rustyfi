@@ -52,6 +52,10 @@ struct Cli {
     /// Ignore cached checkpoints and translate from scratch.
     #[arg(long)]
     fresh: bool,
+
+    /// Print a machine-readable JSON summary to stdout (implies --quiet).
+    #[arg(long)]
+    json: bool,
 }
 
 fn main() -> ExitCode {
@@ -106,7 +110,7 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
 
     print_banner(&source_dir, &output, &name);
 
-    let rich = !cli.quiet && std::io::stderr().is_terminal();
+    let rich = !cli.quiet && !cli.json && std::io::stderr().is_terminal();
     let mut ui = progress::Ui::new(rich);
 
     let config = RunConfig {
@@ -127,6 +131,7 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
         tier_mid_tokens: env_usize("RUSTYFI_TIER_MID").unwrap_or(3000),
     };
 
+    let started = std::time::Instant::now();
     let outcome = run(config, |p| ui.handle(&p));
     ui.finish();
     let result = outcome.map_err(friendly_engine_err)?;
@@ -135,7 +140,25 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
     let files = unzip::extract_bytes_stripping_root(&result.zip, &output)
         .map_err(|e| format!("writing output crate: {e}"))?;
 
-    print_summary(&result, &output, files);
+    if cli.json {
+        let translate_model = rustyfi_engine::llm::LlmClient::from_env()
+            .map(|c| c.model().to_string())
+            .unwrap_or_else(|_| "unknown".into());
+        let fix_model = rustyfi_engine::llm::LlmClient::for_fixing()
+            .map(|c| c.model().to_string())
+            .unwrap_or_else(|_| translate_model.clone());
+        let summary = build_json_summary(
+            &result,
+            &output,
+            files,
+            started.elapsed().as_secs_f64(),
+            &translate_model,
+            &fix_model,
+        );
+        println!("{summary}");
+    } else {
+        print_summary(&result, &output, files);
+    }
     Ok(if result.cargo_clean {
         ExitCode::SUCCESS
     } else {
@@ -208,6 +231,34 @@ fn print_summary(r: &RunResult, output: &Path, files: usize) {
         );
     }
     eprintln!();
+}
+
+/// One-line machine-readable run summary (the `--json` contract).
+/// Schema documented in bench/README later; exit_code mirrors the process exit.
+fn build_json_summary(
+    r: &RunResult,
+    output: &Path,
+    files_written: usize,
+    duration_secs: f64,
+    translate_model: &str,
+    fix_model: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "crate_name": r.crate_name,
+        "crate_path": output.display().to_string(),
+        "language": r.language,
+        "files_total": r.files_translated + r.files_failed,
+        "files_translated": r.files_translated,
+        "files_failed": r.files_failed,
+        "files_written": files_written,
+        "errors": r.error_count,
+        "todos": r.todo_count,
+        "cargo_clean": r.cargo_clean,
+        "duration_secs": duration_secs,
+        "translate_model": translate_model,
+        "fix_model": fix_model,
+        "exit_code": if r.cargo_clean { 0 } else { 1 },
+    })
 }
 
 // ── env / preflight ──────────────────────────────────────────────────────────
@@ -339,5 +390,41 @@ mod tests {
             derive_name(Path::new("/x/123go"), Path::new("123go")),
             "project_123go"
         );
+    }
+
+    #[test]
+    fn json_summary_has_all_contract_fields() {
+        let r = RunResult {
+            zip: vec![],
+            crate_name: "demo".into(),
+            language: "go".into(),
+            files_failed: 1,
+            cargo_clean: false,
+            error_count: 42,
+            todo_count: 12,
+            files_translated: 23,
+        };
+        let v = build_json_summary(
+            &r,
+            Path::new("/out/demo-rust"),
+            13,
+            271.5,
+            "deepseek-chat",
+            "deepseek-reasoner",
+        );
+        assert_eq!(v["crate_name"], "demo");
+        assert_eq!(v["crate_path"], "/out/demo-rust");
+        assert_eq!(v["language"], "go");
+        assert_eq!(v["files_total"], 24); // translated + failed
+        assert_eq!(v["files_translated"], 23);
+        assert_eq!(v["files_failed"], 1);
+        assert_eq!(v["files_written"], 13);
+        assert_eq!(v["errors"], 42);
+        assert_eq!(v["todos"], 12);
+        assert_eq!(v["cargo_clean"], false);
+        assert_eq!(v["duration_secs"], 271.5);
+        assert_eq!(v["translate_model"], "deepseek-chat");
+        assert_eq!(v["fix_model"], "deepseek-reasoner");
+        assert_eq!(v["exit_code"], 1);
     }
 }
