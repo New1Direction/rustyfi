@@ -1,0 +1,84 @@
+# rustyfi benchmark suite — pinned real-world repos.
+# expectation: clean      → must compile clean for the suite to count it
+#              partial    → real app, gaps acceptable, counted in median
+#              impossible → native-C-dependency heavy; reported, excluded from clean-rate denominator
+
+[[repo]]
+name = "calculator"
+source = "examples/calculator"
+pinned_commit = "local"
+language = "go"
+size_tier = "small"
+expectation = "clean"
+
+[[repo]]
+name = "prompt-cache"
+source = "https://github.com/messkan/prompt-cache"
+pinned_commit = "1898127820a2366a224f0c293594c9cf20db760e"
+language = "go"
+size_tier = "medium"
+expectation = "clean"
+
+[[repo]]
+name = "cobra"
+source = "https://github.com/spf13/cobra"
+pinned_commit = "ad460ea8f249db69c943a365fb84f3a59042d54e"
+language = "go"
+size_tier = "medium"
+expectation = "clean"
+
+[[repo]]
+name = "itsdangerous"
+source = "https://github.com/pallets/itsdangerous"
+pinned_commit = "672971d66a2ef9f85151e53283113f33d642dabd"
+language = "python"
+size_tier = "small"
+expectation = "clean"
+
+[[repo]]
+name = "axios"
+source = "https://github.com/axios/axios"
+pinned_commit = "32fc489632377d214db55bfa4e2c48486a7d7ce2"
+language = "javascript"
+size_tier = "medium"
+expectation = "partial"
+
+[[repo]]
+name = "paint"
+source = "https://github.com/janlelis/paint"
+pinned_commit = "d381356e817e8985db35d880f79bf475add143b1"
+language = "ruby"
+size_tier = "small"
+expectation = "clean"
+
+[[repo]]
+name = "emoji-java"
+source = "https://github.com/vdurmont/emoji-java"
+pinned_commit = "8c5190b411daad67c38e9f014f719b2f65f62d6f"
+language = "java"
+size_tier = "medium"
+expectation = "partial"
+
+[[repo]]
+name = "thc-hydra"
+source = "https://github.com/vanhauser-thc/thc-hydra"
+pinned_commit = "66816029386f8456c31329afe9e2e0cf028b2755"
+language = "c"
+size_tier = "large"
+expectation = "impossible"
+
+[[repo]]
+name = "ky"
+source = "https://github.com/sindresorhus/ky"
+pinned_commit = "61d6d66d27911001b9b4d57ab93139f9ad61384b"
+language = "typescript"
+size_tier = "medium"
+expectation = "clean"
+
+[[repo]]
+name = "clifx"
+source = "https://github.com/Tyrrrz/CliFx"
+pinned_commit = "a2c05985660e6bc53550a3df12148591b8d71f16"
+language = "csharp"
+size_tier = "medium"
+expectation = "partial"

@@ -16,6 +16,9 @@ rustyfi_uploads/
 *.pem
 *.key
 
+# Benchmark suite scratch space (clones + generated crates + per-run JSON)
+bench/.work/
+
 # Editor / OS junk
 .DS_Store
 .idea/
