@@ -1,0 +1,23 @@
+[[repo]]
+name = "alpha"
+source = "x"
+pinned_commit = "local"
+language = "go"
+size_tier = "small"
+expectation = "clean"
+
+[[repo]]
+name = "beta"
+source = "x"
+pinned_commit = "local"
+language = "python"
+size_tier = "small"
+expectation = "clean"
+
+[[repo]]
+name = "gamma"
+source = "x"
+pinned_commit = "local"
+language = "c"
+size_tier = "large"
+expectation = "impossible"
