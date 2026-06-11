@@ -17,9 +17,12 @@ say() { printf '\033[1;33m[bench]\033[0m %s\n' "$1" >&2; }
 
 [ "$ONLY" = "--aggregate-only" ] || {
   [ -n "${RUSTYFI_LLM_API_KEY:-}" ] || { say "RUSTYFI_LLM_API_KEY not set"; exit 2; }
+  command -v python3 >/dev/null 2>&1 || { say "python3 is required"; exit 2; }
+  python3 -c 'import tomllib' 2>/dev/null || python3 -c 'import tomli' 2>/dev/null \
+    || { say "python3 needs tomllib (3.11+) or: pip install tomli"; exit 2; }
   say "building release CLI"
   cargo build --release -p rustyfi-cli --manifest-path "$ROOT/Cargo.toml" >&2
-  mkdir -p "$RESULTS" "$WORK/src"
+  mkdir -p "$RESULTS" "$WORK/src" "$WORK/out"
 
   TAB="$(printf '\t')"
   python3 - "$BENCH/repos.toml" <<'EOF' | while IFS="$TAB" read -r name source commit; do
@@ -45,6 +48,7 @@ EOF
       # Trade-off: adds a network round-trip per run; acceptable for a benchmark
       # suite that is not meant to be run continuously.
       rm -rf "$src"
+      # A clone failure aborts the whole suite (set -e): a partial RESULTS.md is worse than none.
       git clone --quiet "$source" "$src" >&2
       git -C "$src" fetch --quiet origin "$commit" 2>/dev/null || true
       git -C "$src" checkout --quiet "$commit"
