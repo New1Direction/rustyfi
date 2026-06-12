@@ -94,6 +94,15 @@ impl DoctorSession {
         }
     }
 
+    /// Count an invalid tool invocation toward the session budget.
+    ///
+    /// Invalid tool invocations (unknown tool name or missing/bad arguments) consume
+    /// budget too — a misbehaving model must not loop for free. Call this method
+    /// in error paths before continuing the loop.
+    pub(crate) fn count_invalid_call(&mut self) {
+        self.calls_used += 1;
+    }
+
     /// Execute one tool call.  Always increments `calls_used` first; returns a
     /// terminal outcome if the budget is already exhausted before dispatch.
     pub fn execute(&mut self, call: ToolCall) -> ToolOutcome {
@@ -884,6 +893,8 @@ pub fn run_doctor(
                         // Feed the parse error back to the model as a tool result.
                         let error_content = format!("error: {e}");
                         progress_cb(format!("doctor: bad tool call ({e})"));
+                        // Invalid tool invocations consume budget too.
+                        session.count_invalid_call();
                         // We need to append a tool result even without a valid
                         // tool_call_id; use a plain user message as a fallback
                         // (documented simplification for the scripted test path).
@@ -1358,6 +1369,38 @@ mod tests {
         assert_eq!(s.calls_used(), 1);
         s.execute(ToolCall::ListFiles);
         assert_eq!(s.calls_used(), 2);
+    }
+
+    #[test]
+    fn bad_tool_calls_consume_budget() {
+        let (_tmp, ws) = mini_crate();
+        let budget = DoctorBudget {
+            max_tool_calls: 2,
+            max_wall_secs: 1200,
+        };
+        let mut s = DoctorSession::new(&ws, budget);
+
+        // Simulate invalid tool calls by directly invoking count_invalid_call.
+        assert_eq!(s.calls_used(), 0);
+        assert!(!s.budget_exhausted());
+
+        // First invalid call.
+        s.count_invalid_call();
+        assert_eq!(s.calls_used(), 1);
+        assert!(!s.budget_exhausted());
+
+        // Second invalid call.
+        s.count_invalid_call();
+        assert_eq!(s.calls_used(), 2);
+        assert!(!s.budget_exhausted());
+
+        // Third invalid call consumes the last unit of budget.
+        s.count_invalid_call();
+        assert_eq!(s.calls_used(), 3);
+        assert!(
+            s.budget_exhausted(),
+            "budget should be exhausted after 3 calls with max_tool_calls=2"
+        );
     }
 
     // ── T9: tail_truncate helper ─────────────────────────────────────────────
