@@ -10,7 +10,17 @@ permissions:
   contents: write
 
 jobs:
+  # upload-rust-binary-action uploads to an existing release — create it first.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   binaries:
+    needs: create-release
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -22,7 +32,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14   # macos-13 (intel) runners are retired; cross-build x86_64 on arm64
           - target: aarch64-apple-darwin
             os: macos-14
           - target: x86_64-pc-windows-msvc
