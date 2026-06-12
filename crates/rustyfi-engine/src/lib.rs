@@ -1,8 +1,11 @@
+pub mod agent_fix;
 pub mod analysis;
 pub mod checkpoint;
 pub mod chunker;
+pub mod contract_check;
 pub mod dedup_items;
 pub mod deps;
+pub mod fix_context;
 pub mod graph;
 pub mod llm;
 pub mod pipeline;

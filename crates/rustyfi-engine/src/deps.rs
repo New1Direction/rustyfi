@@ -178,6 +178,34 @@ pub fn detect_missing_deps(
     out
 }
 
+/// Scan a source text for curated registry crates referenced in it.
+///
+/// Unlike `detect_missing_deps` (which walks a workspace directory), this
+/// function works on an in-memory string and ignores the base/std heads that
+/// are already present in the skeleton Cargo.toml. Used by `contract_check` to
+/// add registry deps to the throwaway skeleton crate so contracts that use
+/// serde/tokio/etc. are checkable.
+pub fn scan_crate_heads_for_registry(src: &str) -> Vec<&'static CrateSpec> {
+    let heads = scan_crate_heads(src);
+    let mut satisfied: BTreeSet<String> = BTreeSet::new();
+    satisfied.extend(BASE_HEADS.iter().map(|s| s.to_string()));
+    satisfied.extend(STD_HEADS.iter().map(|s| s.to_string()));
+
+    let mut out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for head in &heads {
+        if satisfied.contains(head) {
+            continue;
+        }
+        if let Some(spec) = REGISTRY.iter().find(|s| s.head == *head) {
+            if seen.insert(spec.krate) {
+                out.push(spec);
+            }
+        }
+    }
+    out
+}
+
 /// Parse the `name` of each entry under `[dependencies]` in a Cargo.toml.
 fn declared_dep_names(cargo_toml: &str) -> Vec<String> {
     let mut names = Vec::new();
