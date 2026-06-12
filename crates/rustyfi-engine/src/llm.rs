@@ -226,6 +226,79 @@ impl GrokToken {
 }
 
 // ---------------------------------------------------------------------------
+// Tool-calling types and helpers
+// ---------------------------------------------------------------------------
+
+/// The output of one model turn in a tool-calling conversation.
+#[derive(Debug, Clone)]
+pub enum AssistantTurn {
+    /// The model wants to call a tool.
+    ToolInvocation {
+        name: String,
+        arguments_json: String,
+    },
+    /// The model produced a plain text reply.
+    Text(String),
+}
+
+/// Build the JSON request body for a tool-calling completion request.
+///
+/// This is a pure function so that it can be unit-tested without network I/O.
+/// `messages` should carry the running conversation (system message is added
+/// first by this helper from the `system` argument).
+pub fn build_tools_request_body(
+    model: &str,
+    system: &str,
+    messages: &[serde_json::Value],
+    tools: &serde_json::Value,
+) -> serde_json::Value {
+    let mut all_messages = Vec::with_capacity(messages.len() + 1);
+    all_messages.push(json!({ "role": "system", "content": system }));
+    all_messages.extend_from_slice(messages);
+
+    json!({
+        "model": model,
+        "temperature": 0.1,
+        "max_tokens": 8192,
+        "tools": tools,
+        "messages": all_messages,
+    })
+}
+
+/// Parse a raw OpenAI-format chat completion response into an `AssistantTurn`
+/// plus the raw assistant message object (for verbatim re-insertion into the
+/// conversation so that `tool_call_id` values round-trip correctly).
+fn parse_tools_response(
+    val: serde_json::Value,
+) -> Result<(AssistantTurn, serde_json::Value), EngineError> {
+    let message = val["choices"][0]["message"].clone();
+
+    // Determine the turn type from the message object.
+    let tool_calls = message.get("tool_calls");
+    let turn = match tool_calls {
+        Some(tc) if tc.is_array() && !tc.as_array().unwrap().is_empty() => {
+            let first = &tc[0];
+            let name = first["function"]["name"].as_str().unwrap_or("").to_string();
+            let arguments_json = first["function"]["arguments"]
+                .as_str()
+                .unwrap_or("{}")
+                .to_string();
+            AssistantTurn::ToolInvocation {
+                name,
+                arguments_json,
+            }
+        }
+        _ => {
+            // No tool_calls (absent, null, or empty array) → text reply.
+            let content = message["content"].as_str().unwrap_or("").to_string();
+            AssistantTurn::Text(content)
+        }
+    };
+
+    Ok((turn, message))
+}
+
+// ---------------------------------------------------------------------------
 // Public LLM client
 // ---------------------------------------------------------------------------
 
@@ -430,6 +503,85 @@ impl LlmClient {
             )));
         }
         Ok(content)
+    }
+
+    /// Multi-turn tool-calling completion (OpenAI tool-calling wire format).
+    ///
+    /// `messages` carries the running conversation including any prior
+    /// `{role:"tool", tool_call_id, content}` result messages — the caller
+    /// manages the conversation slice.  The `tools` value must be an OpenAI
+    /// `tools` array JSON value.
+    ///
+    /// Returns `(AssistantTurn, raw_message_json)`.  The caller should append
+    /// the raw message JSON to the conversation verbatim so that tool_call_id
+    /// values round-trip correctly in subsequent turns.
+    ///
+    /// Note: the `tools` JSON value must stay alive for the duration of this
+    /// call (it is borrowed for request-body construction only).
+    pub fn complete_with_tools(
+        &self,
+        system: &str,
+        messages: &[serde_json::Value],
+        tools: &serde_json::Value,
+    ) -> Result<(AssistantTurn, serde_json::Value), EngineError> {
+        let (url, auth_header) = match &self.provider {
+            Provider::OpenAi { base_url, .. } => {
+                let key = self
+                    .provider
+                    .next_key()
+                    .ok_or_else(|| EngineError::Config("No API keys configured".into()))?;
+                (
+                    format!("{base_url}/chat/completions"),
+                    format!("Bearer {key}"),
+                )
+            }
+            Provider::Grok => (
+                format!("{GROK_API_BASE}/chat/completions"),
+                format!("Bearer {}", self.grok_jwt()?),
+            ),
+        };
+
+        let body = build_tools_request_body(&self.model, system, messages, tools);
+
+        debug!("POST {} (model={}, tools)", url, self.model);
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Authorization", auth_header)
+            .header("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(self.timeout_secs))
+            .json(&body)
+            .send()
+            .map_err(|e| {
+                if e.is_timeout() {
+                    EngineError::Llm(format!(
+                        "timeout after {}s (model={})",
+                        self.timeout_secs, self.model
+                    ))
+                } else {
+                    EngineError::Llm(format!("HTTP error: {e}"))
+                }
+            })?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let body_text = resp.text().unwrap_or_default();
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                return Err(EngineError::Config(format!(
+                    "The LLM provider rejected the credentials (HTTP {status}). \
+                     Check RUSTYFI_LLM_API_KEY / RUSTYFI_PROVIDER and restart the server. \
+                     Provider said: {body_text}"
+                )));
+            }
+            return Err(EngineError::Llm(format!("LLM HTTP {status}: {body_text}")));
+        }
+
+        let val: serde_json::Value = resp
+            .json()
+            .map_err(|e| EngineError::Llm(format!("JSON parse: {e}")))?;
+
+        parse_tools_response(val)
     }
 
     /// Returns true if this client is using the Grok provider.
@@ -917,6 +1069,152 @@ fn urlenccode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Tool-calling request body ─────────────────────────────────────────────
+
+    #[test]
+    fn build_tools_request_body_includes_system_first() {
+        let tools = json!([{"type": "function", "function": {"name": "list_files"}}]);
+        let messages = vec![json!({"role": "user", "content": "hello"})];
+        let body = build_tools_request_body("gpt-4o", "You are helpful.", &messages, &tools);
+
+        // System message must be the first in the messages array.
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system", "first message must be system");
+        assert_eq!(msgs[0]["content"], "You are helpful.");
+        // The user message follows.
+        assert_eq!(msgs[1]["role"], "user");
+        assert_eq!(msgs[1]["content"], "hello");
+        // model, temperature, max_tokens present.
+        assert_eq!(body["model"], "gpt-4o");
+        assert_eq!(body["temperature"], 0.1);
+        assert_eq!(body["max_tokens"], 8192);
+        // tools array present.
+        assert!(body["tools"].is_array(), "tools must be an array");
+    }
+
+    #[test]
+    fn build_tools_request_body_preserves_message_order() {
+        let tools = json!([]);
+        let messages = vec![
+            json!({"role": "user",      "content": "first"}),
+            json!({"role": "assistant", "content": "second"}),
+            json!({"role": "user",      "content": "third"}),
+        ];
+        let body = build_tools_request_body("model", "sys", &messages, &tools);
+        let msgs = body["messages"].as_array().unwrap();
+        // 1 system + 3 conversation messages.
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[1]["content"], "first");
+        assert_eq!(msgs[2]["content"], "second");
+        assert_eq!(msgs[3]["content"], "third");
+    }
+
+    // ── Tool-calling response parsing ────────────────────────────────────────
+
+    fn make_response_with_tool_call(name: &str, args: &str) -> serde_json::Value {
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": args
+                        }
+                    }]
+                }
+            }]
+        })
+    }
+
+    fn make_response_text(content: &str) -> serde_json::Value {
+        json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": content
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn parse_tool_call_present() {
+        let val = make_response_with_tool_call("read_file", r#"{"path":"src/main.rs"}"#);
+        let (turn, raw) = parse_tools_response(val).unwrap();
+        match turn {
+            AssistantTurn::ToolInvocation {
+                name,
+                arguments_json,
+            } => {
+                assert_eq!(name, "read_file");
+                assert_eq!(arguments_json, r#"{"path":"src/main.rs"}"#);
+            }
+            AssistantTurn::Text(t) => panic!("expected ToolInvocation, got Text({t:?})"),
+        }
+        // Raw message must carry tool_calls for round-tripping.
+        assert!(
+            raw["tool_calls"].is_array(),
+            "raw message must contain tool_calls"
+        );
+    }
+
+    #[test]
+    fn parse_text_when_no_tool_calls() {
+        let val = make_response_text("Here is my analysis.");
+        let (turn, _raw) = parse_tools_response(val).unwrap();
+        match turn {
+            AssistantTurn::Text(t) => assert_eq!(t, "Here is my analysis."),
+            AssistantTurn::ToolInvocation { name, .. } => {
+                panic!("expected Text, got ToolInvocation({name})")
+            }
+        }
+    }
+
+    #[test]
+    fn parse_text_when_tool_calls_empty_array() {
+        let val = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "ok",
+                    "tool_calls": []
+                }
+            }]
+        });
+        let (turn, _raw) = parse_tools_response(val).unwrap();
+        match turn {
+            AssistantTurn::Text(t) => assert_eq!(t, "ok"),
+            AssistantTurn::ToolInvocation { name, .. } => {
+                panic!("expected Text for empty tool_calls, got ToolInvocation({name})")
+            }
+        }
+    }
+
+    #[test]
+    fn parse_text_when_content_missing() {
+        // Some providers omit content entirely when there are no tool calls.
+        let val = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant"
+                }
+            }]
+        });
+        let (turn, _raw) = parse_tools_response(val).unwrap();
+        match turn {
+            AssistantTurn::Text(t) => assert_eq!(t, ""),
+            AssistantTurn::ToolInvocation { name, .. } => {
+                panic!("expected Text(\"\"), got ToolInvocation({name})")
+            }
+        }
+    }
+
+    // ── extract_rust_code ────────────────────────────────────────────────────
 
     #[test]
     fn extracts_clean_fenced_block() {
