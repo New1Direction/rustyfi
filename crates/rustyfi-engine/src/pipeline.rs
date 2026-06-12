@@ -1447,12 +1447,12 @@ where
     let mut diags = parse_cargo_diagnostics(&current).unwrap_or_default();
 
     if !exit_clean {
-        // Build the item index once per fix cycle (workspace-wide syn parse).
-        // Failure produces an empty index; the fix loop continues without context.
-        let item_index = fix_context::ItemIndex::build(ws);
-
         for attempt in 1..=config.verify_retries {
             emit(progress_cb, Progress::FixCycle { attempt });
+
+            // Rebuild the item index each cycle — fixes rewrite files.
+            // Failure produces an empty index; the fix loop continues without context.
+            let item_index = fix_context::ItemIndex::build(ws);
 
             let families = classify_and_rank(&diags);
             let family_names: Vec<String> = families.iter().map(|(n, _)| n.to_string()).collect();
