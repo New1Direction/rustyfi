@@ -236,7 +236,7 @@ fn print_summary(r: &RunResult, output: &Path, files: usize) {
 }
 
 /// One-line machine-readable run summary (the `--json` contract).
-/// Schema documented in bench/README later; exit_code mirrors the process exit.
+/// Schema documented in bench/README.md; exit_code mirrors the process exit.
 fn build_json_summary(
     r: &RunResult,
     output: &Path,
