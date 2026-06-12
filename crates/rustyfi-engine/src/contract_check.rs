@@ -27,8 +27,10 @@ const IMPORT_CODES: &[&str] = &["E0432", "E0433", "E0405", "E0412"];
 /// items (fn, struct, enum, trait, type alias, const) plus trait method names
 /// as `"TraitName::method_name"`.
 ///
-/// On parse failure returns an empty set — callers must treat that as "unknown"
-/// and should not reject the regeneration solely on this basis.
+/// On parse failure returns an empty set. For a REGENERATED contract that means
+/// "100% of items lost" and `regeneration_acceptable` will reject it when the
+/// old set was non-empty — deliberately: an unparseable contract must never
+/// replace a working one.
 pub fn item_names(contract_rust: &str) -> BTreeSet<String> {
     let file = match syn::parse_str::<syn::File>(contract_rust) {
         Ok(f) => f,
@@ -801,6 +803,19 @@ pub trait Provider {
         assert!(
             regeneration_acceptable(&old, &new),
             "1 of 10 (exactly 10%) should be acceptable"
+        );
+    }
+
+    #[test]
+    fn regen_unparseable_new_is_rejected() {
+        // item_names(garbage) = ∅ → looks like a 100% drop → must be rejected
+        // (an unparseable contract never replaces a working one).
+        let old: BTreeSet<String> = ["A", "B", "C"].iter().map(|s| s.to_string()).collect();
+        let new = item_names("this is not rust ((");
+        assert!(new.is_empty());
+        assert!(
+            !regeneration_acceptable(&old, &new),
+            "unparseable regeneration must be rejected when the old set is non-empty"
         );
     }
 

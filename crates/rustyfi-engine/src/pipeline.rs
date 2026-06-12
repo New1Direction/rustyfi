@@ -763,9 +763,12 @@ where
             // (a) hand it to the model as a "must not drop" list, and
             // (b) reject the regeneration if it drops >10% of the API surface.
             let old_names = crate::contract_check::item_names(&prev_contract);
-            let mut sorted_names: Vec<&str> = old_names.iter().map(String::as_str).collect();
-            sorted_names.sort_unstable();
-            let original_items_list = sorted_names.join("\n");
+            // BTreeSet iteration is already sorted — deterministic prompt text.
+            let original_items_list = old_names
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n");
 
             emit(
                 progress_cb,
