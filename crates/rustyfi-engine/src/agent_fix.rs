@@ -284,8 +284,8 @@ impl DoctorSession {
     }
 
     fn explain(&self, code: &str) -> ToolOutcome {
-        let payload =
-            explain_excerpt(code).unwrap_or_else(|| "no explanation available".to_string());
+        let payload = crate::fix_context::explain_excerpt(code)
+            .unwrap_or_else(|| "no explanation available".to_string());
         ToolOutcome {
             payload,
             is_terminal: false,
@@ -406,50 +406,6 @@ const READ_CAP: usize = 24_000;
 
 /// Payload cap for `CargoCheck` (bytes, before appending error count line).
 const CARGO_CHECK_CAP: usize = 8_000;
-
-/// Return a cached `rustc --explain` excerpt for `code`, or `None`.
-///
-/// This wraps the process-global cache inside `fix_context` via a thin shim so
-/// callers outside `DoctorSession` can use it (e.g. tests).
-pub fn explain_excerpt(code: &str) -> Option<String> {
-    // Re-use the cache inside fix_context by running the same command.
-    // We call rustc directly here to keep the coupling explicit.
-    use std::collections::HashMap;
-    use std::process::Command;
-    use std::sync::{Mutex, OnceLock};
-
-    fn cache() -> &'static Mutex<HashMap<String, String>> {
-        static C: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-        C.get_or_init(|| Mutex::new(HashMap::new()))
-    }
-
-    {
-        let guard = cache().lock().ok()?;
-        if let Some(v) = guard.get(code) {
-            return if v.is_empty() { None } else { Some(v.clone()) };
-        }
-    }
-
-    let out = Command::new("rustc")
-        .args(["--explain", code])
-        .output()
-        .ok()?;
-
-    let text: String = if out.status.success() {
-        let raw = String::from_utf8_lossy(&out.stdout);
-        raw.lines().take(40).collect::<Vec<_>>().join("\n")
-    } else {
-        String::new()
-    };
-
-    let mut guard = cache().lock().ok()?;
-    guard.insert(code.to_string(), text.clone());
-    if text.is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
 
 /// Truncate `s` to at most `cap` bytes, appending `"\n…[truncated]"` when
 /// truncation occurs.  Snaps to a valid UTF-8 boundary.

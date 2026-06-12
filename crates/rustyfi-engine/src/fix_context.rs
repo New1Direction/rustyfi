@@ -52,7 +52,9 @@ fn explain_cache() -> &'static Mutex<HashMap<String, String>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn rustc_explain(code: &str) -> Option<String> {
+/// Return a cached `rustc --explain` excerpt for `code`, or `None`.
+/// Uses a process-global OnceLock cache to avoid redundant command invocations.
+pub fn explain_excerpt(code: &str) -> Option<String> {
     // Check cache first.
     {
         let cache = explain_cache().lock().ok()?;
@@ -263,7 +265,7 @@ impl ItemIndex {
 
         // ── 7. rustc --explain excerpts ───────────────────────────────────────
         for code in &distinct_codes {
-            if let Some(explanation) = rustc_explain(code) {
+            if let Some(explanation) = explain_excerpt(code) {
                 explain_blocks.push(format!("// rustc --explain {code}\n{explanation}"));
             }
         }
