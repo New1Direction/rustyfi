@@ -21,7 +21,9 @@ serde       = { version = "1", features = ["derive"] }
 serde_json  = "1"
 thiserror   = "1"
 tokio       = { version = "1", features = ["full"] }
-reqwest     = { version = "0.12", features = ["json", "blocking"] }
+# rustls instead of native-tls: pure-Rust TLS cross-compiles cleanly
+# (openssl-sys broke the aarch64-linux release build).
+reqwest     = { version = "0.12", default-features = false, features = ["json", "blocking", "rustls-tls"] }
 axum        = { version = "0.7", features = ["multipart"] }
 tower-http  = { version = "0.5", features = ["cors", "fs"] }
 walkdir     = "2"
