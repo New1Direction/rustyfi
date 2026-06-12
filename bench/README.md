@@ -31,6 +31,7 @@ clean-rate denominator.
 | `todos` | `todo!()` gaps left in the crate |
 | `cargo_clean` | true only if the crate compiles **and** nothing was stripped/stubbed dishonestly |
 | `duration_secs`, `translate_model`, `fix_model`, `exit_code` | run metadata |
+| `deep_fix` | `null` when `--deep` was not used; `{"ran": true, "start_errors": N, "end_errors": M, "tool_calls": K}` when the agentic doctor ran (present even when reverted — honest) |
 
 A run that crashes (exit 2) gets a stub record instead:
 `{"crate_name": …, "pipeline_failed": true, "exit_code": N}`.

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tempfile::TempDir;
+
 use rustyfi_core::compiler::parse_cargo_diagnostics;
 use rustyfi_core::context::LanguageMetadata;
 use rustyfi_core::state::{CargoOutput, DiagnosticFamily, LtoMode, ReleaseConfig};
@@ -128,6 +130,20 @@ pub enum Progress {
     },
 }
 
+/// Summary of the agentic deep-fix pass (populated when `--deep` / `RUSTYFI_DEEP_FIX=1`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DeepFixSummary {
+    /// Always `true` when this struct is present; included for self-documenting JSON.
+    pub ran: bool,
+    /// Error count before the doctor session started.
+    pub start_errors: usize,
+    /// Error count after the doctor session (post-revert if reverted).
+    pub end_errors: usize,
+    /// Total tool calls consumed by the doctor session (including the seeding check).
+    pub tool_calls: usize,
+}
+
 /// Output of a completed pipeline run.
 pub struct RunResult {
     pub zip: Vec<u8>,
@@ -144,6 +160,8 @@ pub struct RunResult {
     pub todo_count: usize,
     /// Source files translated successfully.
     pub files_translated: usize,
+    /// Present when the agentic deep-fix pass ran (`--deep` / `RUSTYFI_DEEP_FIX=1`).
+    pub deep_fix: Option<DeepFixSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,20 +297,22 @@ where
     };
 
     // ── Phase 4: Verification + targeted fix loop ─────────────────────────
-    let verification_cp = if let Some(cp) = store.read::<VerificationCheckpoint>("verification") {
+    let (verification_cp, deep_fix) = if let Some(cp) = store.read::<VerificationCheckpoint>("verification") {
         emit(
             &mut progress_cb,
             Progress::PhaseResumed {
                 phase: "verification".into(),
             },
         );
-        cp
+        // On a resumed run the doctor pass was already complete (or skipped);
+        // we do not re-run it.  deep_fix is only set on a fresh verification.
+        (cp, None)
     } else {
         emit(
             &mut progress_cb,
             Progress::StateChanged { state: "Verifying" },
         );
-        let cp = phase_verify(
+        let (cp, df) = phase_verify(
             &config,
             fix_llm.as_ref().unwrap_or(&llm),
             &scaffold_cp,
@@ -301,7 +321,7 @@ where
             &mut progress_cb,
         )?;
         store.write("verification", &cp)?;
-        cp
+        (cp, df)
     };
 
     // ── Completion report ─────────────────────────────────────────────────
@@ -313,6 +333,7 @@ where
         &scaffold_cp,
         &translation_cp,
         &verification_cp,
+        deep_fix.as_ref(),
     );
     let _ = fs::write(
         scaffold_cp.workspace_path.join("NEXT_STEPS.md"),
@@ -419,6 +440,7 @@ where
         error_count: verification_cp.final_error_count,
         todo_count: report.todo_count,
         files_translated: report.translated,
+        deep_fix,
     })
 }
 
@@ -1368,7 +1390,7 @@ fn phase_verify<F>(
     _translation: &TranslationCheckpoint,
     package_map: &crate::scaffold::PackageMap,
     progress_cb: &mut F,
-) -> Result<VerificationCheckpoint, EngineError>
+) -> Result<(VerificationCheckpoint, Option<DeepFixSummary>), EngineError>
 where
     F: FnMut(Progress),
 {
@@ -1403,11 +1425,14 @@ where
                     .into(),
             },
         );
-        return Ok(VerificationCheckpoint {
-            exit_clean: false,
-            fix_cycles: vec![],
-            final_error_count: 0,
-        });
+        return Ok((
+            VerificationCheckpoint {
+                exit_clean: false,
+                fix_cycles: vec![],
+                final_error_count: 0,
+            },
+            None,
+        ));
     };
 
     // ── Dependency repair (runs BEFORE the source fix loop) ──────────────
@@ -1587,10 +1612,143 @@ where
         }
     }
 
-    let final_error_count = diags
+    let mut final_error_count = diags
         .iter()
         .filter(|d| d.level >= rustyfi_core::state::DiagnosticLevel::Error)
         .count();
+
+    // ── Optional agentic deep-fix pass (RUSTYFI_DEEP_FIX=1 / --deep) ────────
+    // Engages after the cheap loop + rustfix sweep if the crate is still not
+    // clean.  The deep-fix pass is snapshot-reverted at this level if it
+    // does not strictly improve the error count.
+    let mut deep_fix_summary: Option<DeepFixSummary> = None;
+
+    if !exit_clean && std::env::var("RUSTYFI_DEEP_FIX").is_ok() {
+        let max_tool_calls = std::env::var("RUSTYFI_DEEP_FIX_BUDGET")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(40);
+        let max_wall_secs = std::env::var("RUSTYFI_DEEP_FIX_TIMEOUT")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(1200);
+
+        let budget = crate::agent_fix::DoctorBudget {
+            max_tool_calls,
+            max_wall_secs,
+        };
+
+        emit(
+            progress_cb,
+            Progress::Note {
+                message: format!(
+                    "🩺 Deep-fix: engaging the doctor (budget: {} tool calls / {}s)…",
+                    max_tool_calls, max_wall_secs,
+                ),
+            },
+        );
+
+        // Capture pre-doctor error count using the same counting method as
+        // phase_verify (>= Error) so the keep/revert comparison is consistent.
+        let pre_doctor_errors = final_error_count;
+
+        // Take a snapshot of <ws>/src so we can revert if the doctor makes
+        // things worse.  If snapshotting fails we skip the deep-fix pass
+        // (we cannot safely revert without a snapshot).
+        match snapshot_src(ws) {
+            Err(e) => {
+                emit(
+                    progress_cb,
+                    Progress::Note {
+                        message: format!(
+                            "🩺 doctor: skipping — could not snapshot workspace: {e}"
+                        ),
+                    },
+                );
+            }
+            Ok(snap) => {
+                let mut transport = crate::agent_fix::LlmTransport(llm);
+                let report = crate::agent_fix::run_doctor(
+                    ws,
+                    &mut transport,
+                    budget,
+                    &mut |msg| emit(progress_cb, Progress::Note { message: msg }),
+                );
+
+                // After run_doctor the workspace is in the doctor's final state.
+                // Run a fresh cargo check so our local `exit_clean`,
+                // `diags`, and `final_error_count` are authoritative
+                // (run_doctor's internal check uses == Error; we use >= Error).
+                if let Some(fresh) = cargo_check_opt(ws) {
+                    let fresh_diags = parse_cargo_diagnostics(&fresh).unwrap_or_default();
+                    let post_doctor_errors = fresh_diags
+                        .iter()
+                        .filter(|d| d.level >= rustyfi_core::state::DiagnosticLevel::Error)
+                        .count();
+
+                    if post_doctor_errors < pre_doctor_errors {
+                        // Doctor improved things — keep the changes.
+                        exit_clean = fresh.exit_code == Some(0);
+                        final_error_count = post_doctor_errors;
+                        emit(
+                            progress_cb,
+                            Progress::Note {
+                                message: format!(
+                                    "🩺 doctor: {pre_doctor_errors} → {post_doctor_errors} errors (kept)"
+                                ),
+                            },
+                        );
+                        // Suppress unused-variable warnings — diags and current are
+                        // fully superseded; only exit_clean and final_error_count flow forward.
+                        let _ = (fresh_diags, fresh);
+                    } else {
+                        // Doctor made no improvement — restore the snapshot.
+                        if let Err(e) = restore_src(ws, &snap) {
+                            emit(
+                                progress_cb,
+                                Progress::Note {
+                                    message: format!(
+                                        "🩺 doctor: restore failed ({e}) — workspace may be in a bad state"
+                                    ),
+                                },
+                            );
+                        } else {
+                            emit(
+                                progress_cb,
+                                Progress::Note {
+                                    message: "🩺 doctor made no improvement — reverted".to_string(),
+                                },
+                            );
+                        }
+                        // Re-run cargo check after restore so downstream counts are truthful.
+                        // SAFETY: this runs after the restore copy loop completes;
+                        // if restore_src failed we still re-check to get an honest count.
+                        if let Some(post_revert) = cargo_check_opt(ws) {
+                            let post_diags = parse_cargo_diagnostics(&post_revert).unwrap_or_default();
+                            final_error_count = post_diags
+                                .iter()
+                                .filter(|d| d.level >= rustyfi_core::state::DiagnosticLevel::Error)
+                                .count();
+                            exit_clean = post_revert.exit_code == Some(0);
+                            // Suppress unused-variable warnings.
+                            let _ = (post_diags, post_revert);
+                        }
+                    }
+
+                    // Record the deep-fix summary regardless of keep/revert (honest).
+                    deep_fix_summary = Some(DeepFixSummary {
+                        ran: true,
+                        start_errors: pre_doctor_errors,
+                        end_errors: final_error_count,
+                        tool_calls: report.tool_calls_used,
+                    });
+                } else {
+                    // cargo check unavailable after doctor — restore to be safe and skip summary.
+                    let _ = restore_src(ws, &snap);
+                }
+            }
+        }
+    }
 
     if exit_clean {
         emit(
@@ -1628,11 +1786,101 @@ where
         );
     }
 
-    Ok(VerificationCheckpoint {
-        exit_clean,
-        fix_cycles,
-        final_error_count,
-    })
+    Ok((
+        VerificationCheckpoint {
+            exit_clean,
+            fix_cycles,
+            final_error_count,
+        },
+        deep_fix_summary,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot / restore helpers for the deep-fix pass
+// ---------------------------------------------------------------------------
+
+/// Recursively copy `<ws>/src` to a temporary directory.
+/// Returns the `TempDir` which must be kept alive until `restore_src` is called
+/// (dropping it deletes the snapshot).
+pub fn snapshot_src(ws: &Path) -> Result<TempDir, EngineError> {
+    let src = ws.join("src");
+    let snap = TempDir::new()
+        .map_err(|e| EngineError::Io(format!("snapshot: create tempdir: {e}")))?;
+    let snap_src = snap.path().join("src");
+    fs::create_dir_all(&snap_src)
+        .map_err(|e| EngineError::Io(format!("snapshot: create snap/src: {e}")))?;
+
+    if src.is_dir() {
+        for entry in walkdir::WalkDir::new(&src).into_iter() {
+            let entry = entry.map_err(|e| EngineError::Io(format!("snapshot: walkdir: {e}")))?;
+            let rel = entry
+                .path()
+                .strip_prefix(&src)
+                .map_err(|e| EngineError::Io(format!("snapshot: strip prefix: {e}")))?;
+            let dest = snap_src.join(rel);
+
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&dest)
+                    .map_err(|e| EngineError::Io(format!("snapshot: mkdir {}: {e}", dest.display())))?;
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| EngineError::Io(format!("snapshot: mkdir parent: {e}")))?;
+                }
+                fs::copy(entry.path(), &dest)
+                    .map_err(|e| EngineError::Io(format!("snapshot: copy {}: {e}", entry.path().display())))?;
+            }
+        }
+    }
+
+    Ok(snap)
+}
+
+/// Restore `<ws>/src` from a snapshot previously produced by `snapshot_src`.
+///
+/// The workspace `src/` directory is wiped first, then the snapshot is copied
+/// back.  This operation is NOT atomic — if the process is killed between the
+/// wipe and the full copy the workspace will be in a partial state.  The caller
+/// should always run `cargo_check_opt` after this call to get an honest error
+/// count.
+pub fn restore_src(ws: &Path, snap: &TempDir) -> Result<(), EngineError> {
+    let src = ws.join("src");
+    let snap_src = snap.path().join("src");
+
+    // Wipe the workspace src directory.
+    if src.exists() {
+        fs::remove_dir_all(&src)
+            .map_err(|e| EngineError::Io(format!("restore: remove_dir_all src: {e}")))?;
+    }
+    fs::create_dir_all(&src)
+        .map_err(|e| EngineError::Io(format!("restore: create src: {e}")))?;
+
+    // Copy the snapshot back.
+    if snap_src.is_dir() {
+        for entry in walkdir::WalkDir::new(&snap_src).into_iter() {
+            let entry = entry.map_err(|e| EngineError::Io(format!("restore: walkdir: {e}")))?;
+            let rel = entry
+                .path()
+                .strip_prefix(&snap_src)
+                .map_err(|e| EngineError::Io(format!("restore: strip prefix: {e}")))?;
+            let dest = src.join(rel);
+
+            if entry.file_type().is_dir() {
+                fs::create_dir_all(&dest)
+                    .map_err(|e| EngineError::Io(format!("restore: mkdir {}: {e}", dest.display())))?;
+            } else if entry.file_type().is_file() {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|e| EngineError::Io(format!("restore: mkdir parent: {e}")))?;
+                }
+                fs::copy(entry.path(), &dest)
+                    .map_err(|e| EngineError::Io(format!("restore: copy {}: {e}", entry.path().display())))?;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Extract crate names that `cargo` could not resolve from a failed check.
@@ -1880,6 +2128,7 @@ fn build_next_steps(
     scaffold: &ScaffoldCheckpoint,
     translation: &TranslationCheckpoint,
     verification: &VerificationCheckpoint,
+    doctor: Option<&DeepFixSummary>,
 ) -> NextSteps {
     let ws = &scaffold.workspace_path;
     let scan = scan_src(ws);
@@ -2051,6 +2300,27 @@ fn build_next_steps(
                  often clears several below it. The translated logic is the hard part; \
                  what remains is wiring, dependency names, and the gaps listed above.\n\n",
     );
+
+    // 6. Doctor (optional — only present when the deep-fix pass ran)
+    if let Some(doc) = doctor {
+        md.push_str("## 6. Agentic deep-fix pass\n\n");
+        let outcome = if doc.end_errors < doc.start_errors {
+            format!(
+                "The deep-fix agent reduced errors from **{}** to **{}** ({} tool calls used).",
+                doc.start_errors, doc.end_errors, doc.tool_calls
+            )
+        } else {
+            format!(
+                "The deep-fix agent ran ({} tool calls) but did not reduce the error count \
+                 ({} → {}) — changes were reverted. Try re-running with a stronger \
+                 `RUSTYFI_FIX_MODEL`.",
+                doc.tool_calls, doc.start_errors, doc.end_errors
+            )
+        };
+        md.push_str(&outcome);
+        md.push_str("\n\n");
+    }
+
     md.push_str("---\n_Generated by Rustyfi 🎺 — `cargo check` is the truth, not the model._\n");
 
     // Concise terminal summary.
@@ -2691,5 +2961,99 @@ rstest = "0.18"
         assert!(after.contains("\nserde = \"1\""));
         assert!(after.contains("\nserde_json = \"1\""));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── snapshot_src / restore_src ───────────────────────────────────────────
+
+    /// Build a minimal workspace-like directory with a nested src tree.
+    /// Does NOT create a Cargo.toml or anything that would require cargo to run.
+    fn make_src_tree() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ws = tmp.path().to_path_buf();
+        let src = ws.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        fs::write(src.join("util.rs"), "pub fn helper() {}\n").unwrap();
+        fs::write(src.join("sub").join("mod.rs"), "pub fn sub_fn() {}\n").unwrap();
+        (tmp, ws)
+    }
+
+    #[test]
+    fn snapshot_captures_nested_files() {
+        let (_tmp, ws) = make_src_tree();
+        let snap = snapshot_src(&ws).expect("snapshot_src failed");
+        // Snapshot must contain all three files.
+        assert!(snap.path().join("src/lib.rs").exists(), "lib.rs missing from snapshot");
+        assert!(snap.path().join("src/util.rs").exists(), "util.rs missing from snapshot");
+        assert!(
+            snap.path().join("src/sub/mod.rs").exists(),
+            "sub/mod.rs missing from snapshot"
+        );
+        // Content must match.
+        let lib_content = fs::read_to_string(snap.path().join("src/lib.rs")).unwrap();
+        assert_eq!(lib_content, "pub fn hello() {}\n");
+    }
+
+    #[test]
+    fn restore_src_replaces_modified_files() {
+        let (_tmp, ws) = make_src_tree();
+        // Take snapshot of original state.
+        let snap = snapshot_src(&ws).expect("snapshot_src failed");
+
+        // Modify workspace: overwrite lib.rs and add a new file.
+        fs::write(ws.join("src/lib.rs"), "// modified\n").unwrap();
+        fs::write(ws.join("src/new_file.rs"), "// new\n").unwrap();
+
+        // Restore from snapshot.
+        restore_src(&ws, &snap).expect("restore_src failed");
+
+        // lib.rs must be back to original.
+        let lib_content = fs::read_to_string(ws.join("src/lib.rs")).unwrap();
+        assert_eq!(
+            lib_content,
+            "pub fn hello() {}\n",
+            "lib.rs not restored correctly"
+        );
+        // new_file.rs must be gone (the restore wipes src/ first).
+        assert!(
+            !ws.join("src/new_file.rs").exists(),
+            "new_file.rs should have been wiped by restore"
+        );
+        // Original nested file must still be present.
+        assert!(ws.join("src/sub/mod.rs").exists(), "sub/mod.rs missing after restore");
+        let sub_content = fs::read_to_string(ws.join("src/sub/mod.rs")).unwrap();
+        assert_eq!(sub_content, "pub fn sub_fn() {}\n");
+    }
+
+    #[test]
+    fn restore_src_after_delete_all_recovers() {
+        let (_tmp, ws) = make_src_tree();
+        let snap = snapshot_src(&ws).expect("snapshot_src failed");
+
+        // Simulate a catastrophic delete (what happens if a bad doctor run removes files).
+        fs::remove_dir_all(ws.join("src")).unwrap();
+        assert!(!ws.join("src").exists(), "src should be gone before restore");
+
+        restore_src(&ws, &snap).expect("restore_src failed");
+
+        // All files must be restored.
+        assert!(ws.join("src/lib.rs").exists(), "lib.rs missing after full restore");
+        assert!(ws.join("src/util.rs").exists(), "util.rs missing after full restore");
+        assert!(ws.join("src/sub/mod.rs").exists(), "sub/mod.rs missing after full restore");
+    }
+
+    #[test]
+    fn deep_fix_summary_serializes_to_expected_json() {
+        let s = DeepFixSummary {
+            ran: true,
+            start_errors: 10,
+            end_errors: 3,
+            tool_calls: 12,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["ran"], true);
+        assert_eq!(v["start_errors"], 10);
+        assert_eq!(v["end_errors"], 3);
+        assert_eq!(v["tool_calls"], 12);
     }
 }

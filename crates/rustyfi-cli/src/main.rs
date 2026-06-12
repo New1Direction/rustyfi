@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use console::style;
-use rustyfi_engine::pipeline::{run, RunConfig, RunResult};
+use rustyfi_engine::pipeline::{run, DeepFixSummary, RunConfig, RunResult};
 use rustyfi_engine::EngineError;
 
 #[derive(Parser)]
@@ -56,6 +56,16 @@ struct Cli {
     /// Print a machine-readable JSON summary to stdout (implies --quiet).
     #[arg(long)]
     json: bool,
+
+    /// Engage the deep-fix agent on residual errors (slower, costs more tokens).
+    ///
+    /// Runs a budget-capped agentic session after the standard fix loop if the
+    /// crate is still not clean.  The session is automatically reverted if it
+    /// does not improve the error count.  Budget is capped at 40 tool calls and
+    /// 1200s by default; override with RUSTYFI_DEEP_FIX_BUDGET and
+    /// RUSTYFI_DEEP_FIX_TIMEOUT.
+    #[arg(long)]
+    deep: bool,
 }
 
 fn main() -> ExitCode {
@@ -70,6 +80,13 @@ fn main() -> ExitCode {
 }
 
 fn real_main(cli: Cli) -> Result<ExitCode, String> {
+    // Set the deep-fix flag before preflight and run so the engine picks it up.
+    // SAFETY: the CLI is single-threaded at this point; no other thread can
+    // observe the env var until after `run` (which is called below).
+    if cli.deep {
+        unsafe { std::env::set_var("RUSTYFI_DEEP_FIX", "1") };
+    }
+
     preflight_env()?;
 
     // Resolve the source into a directory (extracting a .zip if needed).
@@ -245,6 +262,12 @@ fn build_json_summary(
     translate_model: &str,
     fix_model: &str,
 ) -> serde_json::Value {
+    let deep_fix = r
+        .deep_fix
+        .as_ref()
+        .map(deep_fix_to_json)
+        .unwrap_or(serde_json::Value::Null);
+
     serde_json::json!({
         "crate_name": r.crate_name,
         "crate_path": output.to_string_lossy(),
@@ -260,6 +283,16 @@ fn build_json_summary(
         "translate_model": translate_model,
         "fix_model": fix_model,
         "exit_code": if r.cargo_clean { 0 } else { 1 },
+        "deep_fix": deep_fix,
+    })
+}
+
+fn deep_fix_to_json(s: &DeepFixSummary) -> serde_json::Value {
+    serde_json::json!({
+        "ran": s.ran,
+        "start_errors": s.start_errors,
+        "end_errors": s.end_errors,
+        "tool_calls": s.tool_calls,
     })
 }
 
@@ -405,6 +438,7 @@ mod tests {
             error_count: 42,
             todo_count: 12,
             files_translated: 23,
+            deep_fix: None,
         };
         let v = build_json_summary(
             &r,
@@ -428,5 +462,41 @@ mod tests {
         assert_eq!(v["translate_model"], "deepseek-chat");
         assert_eq!(v["fix_model"], "deepseek-reasoner");
         assert_eq!(v["exit_code"], 1);
+        // deep_fix absent → null
+        assert_eq!(v["deep_fix"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn json_summary_deep_fix_field_when_present() {
+        use rustyfi_engine::pipeline::DeepFixSummary;
+        let r = RunResult {
+            zip: vec![],
+            crate_name: "demo".into(),
+            language: "go".into(),
+            files_failed: 0,
+            cargo_clean: true,
+            error_count: 0,
+            todo_count: 0,
+            files_translated: 5,
+            deep_fix: Some(DeepFixSummary {
+                ran: true,
+                start_errors: 10,
+                end_errors: 0,
+                tool_calls: 8,
+            }),
+        };
+        let v = build_json_summary(
+            &r,
+            Path::new("/out/demo-rust"),
+            5,
+            60.0,
+            "deepseek-chat",
+            "deepseek-reasoner",
+        );
+        let df = &v["deep_fix"];
+        assert_eq!(df["ran"], true);
+        assert_eq!(df["start_errors"], 10);
+        assert_eq!(df["end_errors"], 0);
+        assert_eq!(df["tool_calls"], 8);
     }
 }
