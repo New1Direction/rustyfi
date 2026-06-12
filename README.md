@@ -19,7 +19,7 @@ does not pretend otherwise. What you get depends on what you feed it:
 | Your project | What comes out |
 |---|---|
 | **Pure logic** — CLIs, libraries, parsers, algorithms, data tools (standard library, no native deps) | Usually a **clean `cargo check`** — drop it, download it, it builds. See the [calculator example](examples/calculator). |
-| **Real-world apps** — web services, framework-heavy, native-library-bound | A **compiling skeleton** with your modules wired up and the type-chaos eliminated, plus an honest `NEXT_STEPS.md` punch-list of what's left (framework API mappings, native deps). |
+| **Real-world apps** — web services, framework-heavy, native-library-bound | A **compiling skeleton** with your modules wired up and the type-chaos eliminated, plus an honest `NEXT_STEPS.md` punch-list of what's left (framework API mappings, native deps). Run `--deep` to let the agentic doctor grind the remaining errors against `cargo check`. |
 
 The UI never lies about which one you got. A partial run never masquerades as a
 perfect one — the result banner and `NEXT_STEPS.md` tell you exactly where you
@@ -80,13 +80,16 @@ round-robins across them. Prefer xAI Grok via OAuth? `export RUSTYFI_PROVIDER=gr
 **A — the CLI** (no server, no browser; scriptable and CI-friendly):
 
 ```bash
-# install it once…
-cargo install --path crates/rustyfi-cli      # → `rustyfi` on your PATH
-# …or run it straight from the workspace:
-cargo run -p rustyfi-cli -- ./myapp -o ./myapp-rust
+# install the released binary (macOS · Linux · Windows, x86_64 + arm64):
+curl -fsSL https://raw.githubusercontent.com/New1Direction/rustyfi/main/install.sh | sh
+#   …or from source:  cargo install --git https://github.com/New1Direction/rustyfi rustyfi-cli
+#   …or in-tree:      cargo run -p rustyfi-cli -- ./myapp -o ./myapp-rust
 
 # then just point it at any project (a directory or a .zip):
 rustyfi ./myapp -o ./myapp-rust
+
+# stuck on the last few errors of a complex app? engage the agentic doctor:
+rustyfi ./myapp -o ./myapp-rust --deep   # needs a strong RUSTYFI_FIX_MODEL
 ```
 
 ```text
@@ -142,8 +145,9 @@ rustyfi-engine::pipeline::run()
    ├─ [Scaffold]    Cargo skeleton · directory-as-package module map
    ├─ [Contract]    ⭐ one cheap call per package extracts the canonical Rust
    │                API (every struct's full fields, enums, traits, signatures),
-   │                written once and injected into every file's prompt — so all
-   │                files agree on shapes and types BEFORE bodies are translated
+   │                then COMPILER-VALIDATES it as a skeleton before fan-out —
+   │                a structurally broken contract (e.g. a dyn-incompatible
+   │                trait) is regenerated, never multiplied across every file
    ├─ [Translate]   DAG-scheduled, semantically chunked, parallel, rate-gated;
    │                each file translated against the canonical contract
    ├─ [Verify]      cargo check ──► the truth oracle
@@ -153,8 +157,13 @@ rustyfi-engine::pipeline::run()
    │     │            guesses are applied only if they reduce the error count.
    │     ├─ dep repair  strip hallucinated/unresolvable crates so resolution
    │     │              succeeds and real errors become visible
-   │     └─ fix loop    targeted LLM repair per error family, fresh diagnostics
-   │                    each cycle, normalized + deduped on every write
+   │     ├─ fix loop    targeted LLM repair per error family — with the trait
+   │     │              definitions, `rustc --explain`, and impls the error
+   │     │              names injected as context; deduped on every write
+   │     └─ doctor ⭐ (--deep) an agentic loop that reads, searches, edits, and
+   │                  re-checks the crate until it compiles or the budget caps —
+   │                  src-confined and snapshot-reverted, so it can never make
+   │                  the crate worse than it found it
    └─ [Package]     ZIP output + NEXT_STEPS.md (Done is sent only after the ZIP
                     is on disk — the download can never race it)
 ```
@@ -202,6 +211,9 @@ already know that we're throwing away?"*
 | `RUSTYFI_FIX_MODEL` | *(falls back to `RUSTYFI_LLM_MODEL`)* | **Stronger model for the compile-fix loop** — translation is cheap, repair is precision work |
 | `RUSTYFI_FIX_BASE_URL` / `RUSTYFI_FIX_API_KEY` / `RUSTYFI_FIX_PROVIDER` | *(fall back to translation config)* | Point the fix loop at a different endpoint entirely |
 | `RUSTYFI_FIX_TIMEOUT` | `180` | Per-request timeout for fixes (reasoning models think longer) |
+| `RUSTYFI_DEEP_FIX` | *(unset)* | Engage the agentic doctor on residual errors (the CLI's `--deep` sets this) |
+| `RUSTYFI_DEEP_FIX_BUDGET` | `40` | Max doctor tool calls before it stops |
+| `RUSTYFI_DEEP_FIX_TIMEOUT` | `1200` | Doctor wall-clock budget, seconds |
 | `RUSTYFI_PROVIDER` | `openai` | `grok` / `xai` to use Grok OAuth instead of an API key |
 | `RUSTYFI_VERIFY_RETRIES` | `4` | Max compile-fix cycles |
 | `RUSTYFI_RPM` | `25` | Global requests-per-minute gate across all workers |
@@ -229,9 +241,12 @@ crates/
 │   ├── graph.rs        # ModuleGraph — DAG + topological scheduler
 │   ├── scaffold.rs     # Cargo generator, directory-as-package layout, ZIP
 │   ├── contract*       # canonical per-package Rust API (in pipeline.rs/llm.rs)
+│   ├── contract_check.rs # ⭐ compiler-validate contracts before fan-out
 │   ├── slicer.rs       # signature extraction / contract splitting
 │   ├── deps.rs         # curated dependency auto-detection (allowlist-only)
 │   ├── rustfix.rs      # apply rustc's own machine-applicable suggestions
+│   ├── fix_context.rs  # ⭐ trait defs + rustc --explain + impls for fix prompts
+│   ├── agent_fix.rs    # ⭐ the doctor — guarded, budgeted, snapshot-reverted
 │   ├── dedup_items.rs  # syn-based duplicate-definition removal
 │   ├── llm.rs          # blocking LLM client (OpenAI-compat + Grok OAuth)
 │   └── pipeline.rs     # end-to-end run() — phased, checkpointed, parallel
@@ -244,6 +259,7 @@ crates/
 
 web/                    # Drop-zone UI: live SSE progress, honest result banner
 examples/calculator/    # Go → clean Rust, verified
+bench/                   # Benchmark suite: pinned real repos, --json, scoreboard
 ```
 
 ---

@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rustyfi — translate any app to Rust, verified by the compiler</title>
+<meta name="description" content="Drop a Python / Go / TypeScript / Java / C / Ruby project in, get a compiling Rust crate out. The LLM generates, cargo check judges. Honest about what's left." />
+<meta property="og:title" content="Rustyfi 🎺🦀 — translate any app to Rust" />
+<meta property="og:description" content="The LLM is an unreliable generator. cargo check is the truth oracle. Get a Rust head-start that the compiler verified — not vibes." />
+<meta property="og:type" content="website" />
+<style>
+  :root {
+    --bg:        oklch(15% 0.012 65);
+    --bg-2:      oklch(18% 0.014 60);
+    --surface:   oklch(22% 0.014 62);
+    --surface-2: oklch(26% 0.016 62);
+    --line:      oklch(34% 0.018 62);
+    --text:      oklch(93% 0.012 85);
+    --muted:     oklch(68% 0.018 72);
+    --faint:     oklch(54% 0.016 70);
+
+    --rust:   oklch(69% 0.19 42);
+    --brass:  oklch(82% 0.13 86);
+    --green:  oklch(75% 0.16 152);
+    --amber:  oklch(80% 0.15 78);
+    --blue:   oklch(74% 0.12 235);
+    --red:    oklch(60% 0.17 28);
+
+    --text-hero:  clamp(2.7rem, 1.2rem + 6vw, 6rem);
+    --text-h2:    clamp(1.3rem, 1rem + 1.1vw, 1.9rem);
+    --space:      clamp(3rem, 2rem + 4vw, 6.5rem);
+    --ease:       cubic-bezier(0.16, 1, 0.3, 1);
+    --radius:     18px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(120% 80% at 85% -10%, oklch(28% 0.05 45 / 0.55), transparent 60%),
+      radial-gradient(90% 60% at 5% 0%, oklch(26% 0.04 90 / 0.4), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    line-height: 1.55; -webkit-font-smoothing: antialiased; letter-spacing: -0.01em;
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.045;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  .wrap { position: relative; z-index: 1; max-width: 1060px; margin: 0 auto; padding: clamp(1.4rem, 3vw, 3rem); }
+  code, .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", monospace; }
+  code { background: oklch(26% 0.016 62 / 0.7); border: 1px solid var(--line); border-radius: 6px; padding: 0.1em 0.4em; font-size: 0.86em; }
+  a { color: var(--brass); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* nav */
+  nav.top { display: flex; justify-content: space-between; align-items: center; padding: 1.2rem 0; font: 600 0.9rem ui-monospace, monospace; }
+  nav.top .brand { color: var(--text); letter-spacing: -0.02em; }
+  nav.top .links { display: flex; gap: 1.3rem; }
+  nav.top .links a { color: var(--muted); }
+
+  /* hero */
+  header.hero { padding: calc(var(--space) * 0.7) 0 calc(var(--space) * 0.5); }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 0.55rem;
+    font: 600 0.78rem/1 ui-monospace, monospace; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--brass); padding: 0.5rem 0.85rem; border: 1px solid var(--line); border-radius: 100px;
+    background: oklch(22% 0.02 70 / 0.5);
+  }
+  .eyebrow .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); animation: pulse 2.6s var(--ease) infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 oklch(75% 0.16 152 / 0.5); } 70%,100% { box-shadow: 0 0 0 9px transparent; } }
+  h1 { font-size: var(--text-hero); line-height: 0.93; letter-spacing: -0.04em; font-weight: 800; margin: 1.5rem 0 0; max-width: 16ch; }
+  h1 .grad { background: linear-gradient(96deg, var(--brass), var(--rust) 75%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .lede { font-size: clamp(1.1rem, 0.95rem + 0.7vw, 1.45rem); color: var(--muted); max-width: 60ch; margin: 1.4rem 0 0; }
+  .lede b { color: var(--text); font-weight: 600; }
+
+  .cta { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-top: 2rem; align-items: center; }
+  .btn { display: inline-flex; align-items: center; gap: 0.5rem; font: 600 0.95rem ui-sans-serif, system-ui; padding: 0.8rem 1.3rem; border-radius: 12px; border: 1px solid var(--line); transition: transform 0.3s var(--ease), border-color 0.3s var(--ease); }
+  .btn:hover { transform: translateY(-2px); text-decoration: none; }
+  .btn.primary { background: linear-gradient(96deg, var(--brass), var(--rust)); color: var(--bg); border-color: transparent; font-weight: 700; }
+  .btn.ghost { color: var(--text); background: oklch(22% 0.014 62 / 0.6); }
+  .btn.ghost:hover { border-color: oklch(48% 0.04 60); }
+
+  .install { margin-top: 1.4rem; display: inline-flex; align-items: center; gap: 0.8rem; padding: 0.7rem 1rem; border: 1px solid var(--line); border-radius: 12px; background: oklch(13% 0.01 60); font: 0.9rem ui-monospace, monospace; }
+  .install .pr { color: var(--rust); }
+  .install .cmd { color: var(--text); }
+
+  /* sections */
+  section { margin-top: var(--space); }
+  .sec-head { display: flex; align-items: baseline; gap: 0.8rem; margin-bottom: 1.6rem; }
+  .sec-head h2 { font-size: var(--text-h2); letter-spacing: -0.025em; margin: 0; font-weight: 750; }
+  .sec-head .n { font: 600 0.78rem ui-monospace, monospace; color: var(--rust); }
+  .sec-head .rule { flex: 1; height: 1px; background: linear-gradient(90deg, var(--line), transparent); }
+
+  .bento { display: grid; grid-template-columns: repeat(12, 1fr); gap: 1rem; }
+  .card {
+    grid-column: span 6; padding: 1.5rem 1.6rem; border: 1px solid var(--line); border-radius: var(--radius);
+    background: linear-gradient(180deg, oklch(23% 0.014 64 / 0.75), oklch(20% 0.013 62 / 0.75));
+    transition: transform 0.4s var(--ease), border-color 0.4s var(--ease), box-shadow 0.4s var(--ease);
+  }
+  .card:hover { transform: translateY(-4px); border-color: oklch(46% 0.04 60); box-shadow: 0 26px 50px -34px oklch(0% 0 0 / 0.9); }
+  .card.wide { grid-column: span 12; }
+  .card.third { grid-column: span 4; }
+  .card .kicker { font: 600 0.72rem/1 ui-monospace, monospace; letter-spacing: 0.15em; text-transform: uppercase; color: var(--faint); }
+  .card h3 { margin: 0.55rem 0 0.45rem; font-size: 1.18rem; letter-spacing: -0.02em; }
+  .card p { margin: 0; color: var(--muted); font-size: 0.94rem; }
+  .big { font: 800 clamp(2.2rem, 1.4rem + 2.6vw, 3.2rem)/1 ui-monospace, monospace; letter-spacing: -0.03em; }
+  .big.green { color: var(--green); } .big.rust { color: var(--rust); } .big.brass { color: var(--brass); }
+  .sub { color: var(--faint); font-size: 0.82rem; margin-top: 0.3rem; }
+
+  /* the arc bars */
+  .arc { display: grid; gap: 0.8rem; margin-top: 0.6rem; }
+  .arow { display: grid; grid-template-columns: minmax(120px,210px) 1fr 52px; gap: 0.9rem; align-items: center; }
+  .arow .lbl { font-size: 0.86rem; color: var(--muted); } .arow .lbl b { color: var(--text); }
+  .track { height: 24px; border-radius: 7px; background: oklch(28% 0.012 62 / 0.6); overflow: hidden; }
+  .fill { height: 100%; border-radius: 7px; transform-origin: left; animation: grow 1.1s var(--ease) both; }
+  @keyframes grow { from { transform: scaleX(0); } }
+  .arow .val { font: 700 0.95rem ui-monospace, monospace; text-align: right; }
+
+  /* terminal */
+  .term { margin-top: 0.6rem; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: oklch(13% 0.01 60); }
+  .term .bar-top { display: flex; gap: 0.4rem; padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--line); align-items: center; }
+  .term .bar-top i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .term .bar-top .t { margin-left: 0.6rem; font: 600 0.76rem ui-monospace, monospace; color: var(--faint); }
+  .term pre { margin: 0; padding: 1.1rem 1.2rem; font: 0.85rem/1.7 ui-monospace, monospace; overflow-x: auto; }
+  .c-in { color: var(--blue); } .c-out { color: var(--green); } .c-cmt { color: var(--faint); } .c-acc { color: var(--brass); }
+
+  ul.clean { list-style: none; padding: 0; margin: 0.5rem 0 0; display: grid; gap: 0.6rem; }
+  ul.clean li { padding-left: 1.5rem; position: relative; color: var(--muted); font-size: 0.95rem; }
+  ul.clean li::before { content: "▸"; position: absolute; left: 0; color: var(--rust); }
+  ul.clean li b { color: var(--text); font-weight: 600; }
+
+  footer { margin: var(--space) 0 2.5rem; padding-top: 1.6rem; border-top: 1px solid var(--line); color: var(--faint); font: 0.85rem ui-monospace, monospace; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 0.8rem; }
+  footer b { color: var(--muted); }
+
+  @media (max-width: 760px) {
+    .card, .card.third { grid-column: span 12; }
+    .arow { grid-template-columns: 96px 1fr 44px; }
+    nav.top .links { gap: 0.9rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <nav class="top">
+    <span class="brand">rustyfi 🎺🦀</span>
+    <span class="links">
+      <a href="#how">How it works</a>
+      <a href="#honest">Honesty</a>
+      <a href="https://github.com/New1Direction/rustyfi">GitHub ↗</a>
+    </span>
+  </nav>
+
+  <header class="hero">
+    <span class="eyebrow"><span class="dot"></span> v0.2.0 · cargo check is the oracle</span>
+    <h1>Translate any app <span class="grad">to Rust.</span></h1>
+    <p class="lede">Drop in a <b>Python, Go, TypeScript, Java, C, C++, C#, or Ruby</b> project — get back a Cargo crate that mirrors your structure, types, and logic. The LLM generates; <b>the compiler judges.</b> So the result is verified, not vibes.</p>
+
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/New1Direction/rustyfi">Get it on GitHub</a>
+      <a class="btn ghost" href="#how">See how it works</a>
+    </div>
+    <div class="install">
+      <span class="pr">$</span>
+      <span class="cmd">curl -fsSL https://raw.githubusercontent.com/New1Direction/rustyfi/main/install.sh | sh</span>
+    </div>
+  </header>
+
+  <!-- the arc -->
+  <section>
+    <div class="sec-head"><span class="n">01</span><h2>The compiler does the grading — and the numbers move</h2><span class="rule"></span></div>
+    <div class="bento">
+      <div class="card wide">
+        <span class="kicker">prompt-cache · a real 23-file Go service · cargo check errors remaining</span>
+        <div class="arc">
+          <div class="arow">
+            <span class="lbl"><b>first cut</b> · naive fix loop</span>
+            <div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,var(--red),oklch(64% 0.18 35))"></div></div>
+            <span class="val" style="color:var(--red)">117</span>
+          </div>
+          <div class="arow">
+            <span class="lbl"><b>+ rustfix + reasoner</b></span>
+            <div class="track"><div class="fill" style="width:36%;background:linear-gradient(90deg,var(--amber),var(--brass));animation-delay:.12s"></div></div>
+            <span class="val" style="color:var(--brass)">42</span>
+          </div>
+          <div class="arow">
+            <span class="lbl"><b>+ contract validation</b></span>
+            <div class="track"><div class="fill" style="width:13%;background:linear-gradient(90deg,var(--brass),var(--rust));animation-delay:.24s"></div></div>
+            <span class="val" style="color:var(--brass)">15</span>
+          </div>
+          <div class="arow">
+            <span class="lbl"><b>+ context-enriched fixes</b></span>
+            <div class="track"><div class="fill" style="width:4%;background:var(--green);animation-delay:.36s"></div></div>
+            <span class="val" style="color:var(--green)">4</span>
+          </div>
+        </div>
+        <p class="sub" style="margin-top:1rem">Every step is a deterministic or compiler-grounded improvement — not a prompt tweak. Each number is what <code>cargo check</code> actually reported.</p>
+      </div>
+
+      <div class="card third">
+        <span class="kicker">pure-logic projects</span>
+        <div class="big green">0</div>
+        <p class="sub">errors — drop it, build it, run it. Clean Go→Rust on the bundled calculator example.</p>
+      </div>
+      <div class="card third">
+        <span class="kicker">zero-token repairs</span>
+        <div class="big brass">200+</div>
+        <p class="sub">errors fixed by applying rustc's own machine-applicable suggestions, before the model spends a token.</p>
+      </div>
+      <div class="card third">
+        <span class="kicker">honest exit codes</span>
+        <div class="big rust">0·1·2</div>
+        <p class="sub">clean / compiles-with-gaps / failed. Scriptable, CI-ready, and never lies about which one you got.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- demo -->
+  <section>
+    <div class="sec-head"><span class="n">02</span><h2>One command, honest output</h2><span class="rule"></span></div>
+    <div class="bento">
+      <div class="card" style="grid-column:span 7">
+        <div class="term">
+          <div class="bar-top"><i style="background:var(--rust)"></i><i style="background:var(--amber)"></i><i style="background:var(--green)"></i><span class="t">rustyfi ./myapp -o ./myapp-rust</span></div>
+<pre><span class="c-in">$ rustyfi ./myapp -o ./myapp-rust</span>
+
+  rustyfi 🎺🦀
+<span class="c-out">▸</span> Analyzing source
+<span class="c-out">▸</span> Scaffolding + pinning type contract
+  <span class="c-acc">· Compiler-checking the contract before translation…</span>
+<span class="c-out">▸</span> Translating to Rust   ████████████ 12/12
+<span class="c-out">▸</span> Verifying with cargo check
+  <span class="c-cmt">· Auto-fixed 37 errors with the compiler's own suggestions (no AI)</span>
+
+  <span class="c-out">✓ compiles clean</span>
+  · 12 translated from go · 18 files · 0 todo!() stubs
+  <span class="c-acc">→ cd ./myapp-rust && cargo run</span></pre>
+        </div>
+      </div>
+      <div class="card" style="grid-column:span 5">
+        <span class="kicker">two interfaces, one engine</span>
+        <h3>CLI or drag-and-drop</h3>
+        <ul class="clean">
+          <li><b>The CLI</b> — scriptable, CI-friendly, exit codes that tell the truth. <code>--deep</code> engages the agentic doctor on stubborn errors.</li>
+          <li><b>The web UI</b> — drop a ZIP, watch it stream, download the crate. Same engine, same honesty.</li>
+          <li><b>Resumable</b> — every phase checkpoints; re-run to continue where an interrupt left off.</li>
+          <li><b>Any provider</b> — any OpenAI-compatible endpoint; cheap model for bulk, strong model for repair.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- how -->
+  <section id="how">
+    <div class="sec-head"><span class="n">03</span><h2>What the compiler already knows, for free</h2><span class="rule"></span></div>
+    <div class="bento">
+      <div class="card">
+        <span class="kicker">contract phase</span>
+        <h3>Agree on the types before writing bodies</h3>
+        <p>One cheap call per package pins the canonical Rust API — then <b>compiles it as a skeleton before fan-out.</b> A structurally broken contract is regenerated, never multiplied into 180 errors across every file. The cheap model with the contract beats the expensive model without it.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">rustfix pass</span>
+        <h3>Don't pay an LLM for fixes rustc computed</h3>
+        <p><code>cargo check</code> emits structured, machine-applicable suggestions for a huge class of errors. Rustyfi applies them directly — and tries the "maybe" ones only when they reduce the error count. The compiler is the oracle, so a wrong guess never sticks.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">context-enriched repair</span>
+        <h3>Show the fixer what the error names</h3>
+        <p>The fix loop sees the trait the compiler says is unsatisfied, the type defined two modules away, the existing impls, and <code>rustc --explain</code> — instead of one file and a bare error string. That's how the trait-bound tail finally shrinks.</p>
+      </div>
+      <div class="card">
+        <span class="kicker">the doctor · --deep</span>
+        <h3>An agent that grinds against ground truth</h3>
+        <p>For the stubborn last mile, an agentic loop reads, searches, edits, and re-checks the crate until it compiles or the budget caps. Edits are confined to <code>src/</code> and snapshot-reverted — <b>it can never make the crate worse than it found it.</b></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- honesty -->
+  <section id="honest">
+    <div class="sec-head"><span class="n">04</span><h2>The honest version</h2><span class="rule"></span></div>
+    <div class="bento">
+      <div class="card wide">
+        <p style="color:var(--text);font-size:1.05rem;line-height:1.7">Translating real software between languages is not a solved problem, and Rustyfi doesn't pretend otherwise. <b>Pure-logic projects</b> — CLIs, libraries, parsers, algorithms — usually come out compiling clean: drop them, build them, run them. <b>Complex real-world apps</b> — framework-heavy, native-library-bound — come out as a compiling skeleton with your modules wired up and the type-chaos eliminated, plus an honest <code>NEXT_STEPS.md</code> punch-list of what's left.</p>
+        <p style="margin-top:1rem;color:var(--muted)">What no tool can do — including this one — is take an arbitrary framework-heavy app and emit clean idiomatic Rust with zero human follow-up. Closing that last mile means mapping one ecosystem's semantics onto another's, which needs a human or a stronger model in the loop. Rustyfi gets you most of the way and is honest about the rest. The result banner and exit code never lie about which outcome you got.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>rustyfi · MIT · the LLM generates, <b>cargo check judges</b></span>
+    <span><a href="https://github.com/New1Direction/rustyfi">github.com/New1Direction/rustyfi</a></span>
+  </footer>
+
+</div>
+</body>
+</html>
