@@ -19,6 +19,8 @@ use crate::fix_context::ItemIndex;
 /// How many tool calls and wall-clock seconds the session may consume.
 #[derive(Debug, Clone)]
 pub struct DoctorBudget {
+    /// The session allows calls 1..=max_tool_calls; call max_tool_calls+1
+    /// returns a terminal "budget exhausted" outcome.
     pub max_tool_calls: usize,
     pub max_wall_secs: u64,
 }
@@ -344,10 +346,19 @@ impl DoctorSession {
         let parent = full.parent().unwrap_or(&full);
         let canon_parent = match parent.canonicalize() {
             Ok(c) => c,
-            // Parent doesn't exist yet — still allow if no traversal components.
+            // Parent doesn't exist yet — fall back to a textual prefix check.
+            // This is weaker than canonicalization (symlinks are not resolved)
+            // but is layered with the `..`-component and absolute-path
+            // rejections above, which together prevent the common traversal
+            // vectors.  We still verify that the resolved path starts with the
+            // workspace root so that any future change to the join/relative
+            // logic cannot silently produce an out-of-workspace path.
             Err(_) => {
-                // If we got here the path had no `..` and isn't absolute, so
-                // accept it; `write_file` will create dirs as needed.
+                if !full.starts_with(&self.workspace) {
+                    return Err(format!(
+                        "cannot verify path is within workspace: {rel_path}"
+                    ));
+                }
                 return Ok(full);
             }
         };
@@ -545,6 +556,11 @@ mod tests {
             "expected error for .., got: {}",
             out.payload
         );
+        assert!(
+            out.payload.contains("path traversal is not allowed"),
+            "expected guard-specific phrase 'path traversal is not allowed', got: {}",
+            out.payload
+        );
     }
 
     #[test]
@@ -557,6 +573,11 @@ mod tests {
         assert!(
             out.payload.starts_with("error:"),
             "expected error for absolute path"
+        );
+        assert!(
+            out.payload.contains("absolute paths are not allowed"),
+            "expected guard-specific phrase 'absolute paths are not allowed', got: {}",
+            out.payload
         );
     }
 
@@ -572,6 +593,11 @@ mod tests {
         assert!(
             out.payload.starts_with("error:"),
             "expected error for file outside allowed locations: {}",
+            out.payload
+        );
+        assert!(
+            out.payload.contains("read not allowed"),
+            "expected guard-specific phrase 'read not allowed', got: {}",
             out.payload
         );
     }
@@ -695,6 +721,11 @@ mod tests {
             "expected error for write outside src/: {}",
             out.payload
         );
+        assert!(
+            out.payload.contains("writes are only allowed under src/"),
+            "expected guard-specific phrase 'writes are only allowed under src/', got: {}",
+            out.payload
+        );
     }
 
     #[test]
@@ -710,6 +741,11 @@ mod tests {
             "expected error for ..: {}",
             out.payload
         );
+        assert!(
+            out.payload.contains("path traversal is not allowed"),
+            "expected guard-specific phrase 'path traversal is not allowed', got: {}",
+            out.payload
+        );
     }
 
     #[test]
@@ -723,6 +759,11 @@ mod tests {
         assert!(
             out.payload.starts_with("error:"),
             "expected error for absolute path"
+        );
+        assert!(
+            out.payload.contains("absolute paths are not allowed"),
+            "expected guard-specific phrase 'absolute paths are not allowed', got: {}",
+            out.payload
         );
     }
 
