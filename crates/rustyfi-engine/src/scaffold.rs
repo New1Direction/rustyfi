@@ -612,6 +612,9 @@ tokio       = {{ version = "1", features = ["full"] }}
 reqwest     = {{ version = "0.12", features = ["json"] }}
 tracing     = "0.1"
 tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
+
+# empty table: keep this crate out of any enclosing workspace
+[workspace]
 "#,
             name = self.crate_name
         );
@@ -1266,5 +1269,30 @@ mod tests {
         assert_eq!(m.get(&p("main.h")).unwrap().root_segment, "main_h");
         assert_eq!(m.get(&p("util.c")).unwrap().root_segment, "util");
         assert_eq!(package_dest(&p("util.c"), &m), p("util/mod.rs"));
+    }
+
+    #[test]
+    fn generated_cargo_toml_opts_out_of_parent_workspace() {
+        // Create a temporary directory to scaffold into
+        let temp_dir = std::env::temp_dir().join("rustyfi_test_scaffold");
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir).unwrap();
+        }
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let scaffolder = Scaffolder::new(temp_dir.clone(), "test_crate".to_string());
+        scaffolder.scaffold().unwrap();
+
+        // Read back the Cargo.toml and verify it contains [workspace]
+        let cargo_path = temp_dir.join("Cargo.toml");
+        let content = fs::read_to_string(&cargo_path).unwrap();
+        assert!(
+            content.contains("[workspace]"),
+            "Cargo.toml should contain [workspace] section to opt out of parent workspace. Got:\n{}",
+            content
+        );
+
+        // Cleanup
+        fs::remove_dir_all(&temp_dir).unwrap();
     }
 }
