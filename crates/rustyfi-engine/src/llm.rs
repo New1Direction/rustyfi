@@ -690,7 +690,16 @@ pub fn prompt_fix(rust_code: &str, errors: &str) -> String {
 }
 
 /// Family-aware fix prompt.
-pub fn prompt_fix_targeted(rust_code: &str, errors: &str, families: &[(&str, &str)]) -> String {
+///
+/// When `fix_context` is non-empty it is inserted after the family-hints block
+/// under the heading `"Relevant project definitions (CANONICAL — match these
+/// exactly, do not redefine):"`.
+pub fn prompt_fix_targeted(
+    rust_code: &str,
+    errors: &str,
+    families: &[(&str, &str)],
+    fix_context: &str,
+) -> String {
     let hint_block = if families.is_empty() {
         String::new()
     } else {
@@ -703,9 +712,18 @@ pub fn prompt_fix_targeted(rust_code: &str, errors: &str, families: &[(&str, &st
         format!("\nDiagnostic families detected (fix in this order):\n{hints}\n")
     };
 
+    let ctx_block = if fix_context.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nRelevant project definitions (CANONICAL — match these exactly, do not redefine):\n{fix_context}\n"
+        )
+    };
+
     format!(
         "Fix the following Rust source file. All errors are from `cargo check`.\n\
-         {hint_block}\n\
+         {hint_block}\
+         {ctx_block}\n\
          Rules:\n\
          - Output ONLY the corrected Rust source — no markdown, no explanation.\n\
          - Fix ALL listed errors. Do not introduce new ones.\n\
@@ -967,6 +985,37 @@ mod tests {
         assert!(
             SYSTEM_CONTRACT.contains("Box<dyn"),
             "SYSTEM_CONTRACT should mention Box<dyn>"
+        );
+    }
+
+    // ── C3: prompt_fix_targeted CANONICAL header ──────────────────────────
+
+    #[test]
+    fn fix_targeted_canonical_header_present_when_context_nonempty() {
+        let p = prompt_fix_targeted(
+            "fn foo() {}",
+            "error: something",
+            &[],
+            "pub trait Provider { fn get(&self); }",
+        );
+        assert!(
+            p.contains(
+                "Relevant project definitions (CANONICAL — match these exactly, do not redefine):"
+            ),
+            "CANONICAL header missing when context is non-empty:\n{p}"
+        );
+        assert!(
+            p.contains("pub trait Provider"),
+            "context body missing from prompt:\n{p}"
+        );
+    }
+
+    #[test]
+    fn fix_targeted_canonical_header_absent_when_context_empty() {
+        let p = prompt_fix_targeted("fn foo() {}", "error: something", &[], "");
+        assert!(
+            !p.contains("CANONICAL"),
+            "CANONICAL header should be absent when context is empty:\n{p}"
         );
     }
 }

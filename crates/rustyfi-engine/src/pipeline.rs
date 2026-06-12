@@ -16,6 +16,7 @@ use crate::checkpoint::{
     VerificationCheckpoint,
 };
 use crate::chunker::SemanticChunker;
+use crate::fix_context;
 use crate::graph::{EdgeRecord, ModuleGraph};
 use crate::llm::{
     extract_rust_code, prompt_extract_contract, prompt_extract_contract_retry, prompt_fix_targeted,
@@ -1446,6 +1447,10 @@ where
     let mut diags = parse_cargo_diagnostics(&current).unwrap_or_default();
 
     if !exit_clean {
+        // Build the item index once per fix cycle (workspace-wide syn parse).
+        // Failure produces an empty index; the fix loop continues without context.
+        let item_index = fix_context::ItemIndex::build(ws);
+
         for attempt in 1..=config.verify_retries {
             emit(progress_cb, Progress::FixCycle { attempt });
 
@@ -1477,7 +1482,8 @@ where
 
             for path in &files_to_fix {
                 if let Ok(code) = fs::read_to_string(path) {
-                    let prompt = prompt_fix_targeted(&code, errors_summary, &top_families);
+                    let ctx = item_index.context_for(path, &diags, fix_context::FIX_CTX_BUDGET);
+                    let prompt = prompt_fix_targeted(&code, errors_summary, &top_families, &ctx);
                     match llm.complete(SYSTEM_FIX, &prompt) {
                         Ok(raw) => {
                             // Re-apply module repair: the LLM rewrites the whole
