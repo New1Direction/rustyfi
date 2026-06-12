@@ -1040,12 +1040,12 @@ mod tests {
         let lines: Vec<&str> = out.payload.lines().collect();
         // Must contain src/lib.rs and src/util.rs
         assert!(
-            lines.iter().any(|l| *l == "src/lib.rs"),
+            lines.contains(&"src/lib.rs"),
             "src/lib.rs missing from: {:?}",
             lines
         );
         assert!(
-            lines.iter().any(|l| *l == "src/util.rs"),
+            lines.contains(&"src/util.rs"),
             "src/util.rs missing from: {:?}",
             lines
         );
