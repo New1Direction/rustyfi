@@ -1,19 +1,19 @@
 # rustyfi benchmark results
 
-**Clean rate (achievable):** 4/9 (44%) · **median errors:** 0.0 · **prompt-cache:** 179 errors
+**Clean rate (achievable):** 3/9 (33%) · **median errors:** 12.5 · **prompt-cache:** 15 errors
 
 | repo | lang | expectation | verdict | errors | todos | files | secs |
 |---|---|---|---|---|---|---|---|
-| calculator | go | clean | 🟢 clean | 0 | 0 | 3/3 | 149 |
-| prompt-cache | go | clean | 🟠 partial | 179 | 12 | 23/23 | 1446 |
-| cobra | go | clean | 🟠 partial | 1 | 17 | 35/36 | 986 |
-| itsdangerous | python | clean | 🟢 clean | 0 | 0 | 15/15 | 336 |
-| axios | javascript | partial | 🟠 partial | 0 | 64 | 222/222 | 901 |
-| paint | ruby | clean | 🟢 clean | 0 | 2 | 14/14 | 820 |
-| emoji-java | java | partial | 🟢 clean | 0 | 0 | 13/13 | 651 |
-| thc-hydra | c | impossible | 🟠 partial | 0 | 297 | 85/85 | 1600 |
-| ky | typescript | clean | 🟠 partial | 127 | 1 | 52/52 | 953 |
-| clifx | csharp | partial | 🟠 partial | 0 | 70 | 115/115 | 732 |
+| calculator | go | clean | 🟢 clean | 0 | 0 | 3/3 | 132 |
+| prompt-cache | go | clean | 🟠 partial | 15 | 3 | 23/23 | 1382 |
+| cobra | go | clean | 🟠 partial | 118 | 8 | 36/36 | 2155 |
+| itsdangerous | python | clean | 🟢 clean | 0 | 1 | 15/15 | 361 |
+| axios | javascript | partial | 🟠 partial | 36 | 12 | 222/222 | 2701 |
+| paint | ruby | clean | 🟠 partial | 10 | 8 | 14/14 | 814 |
+| emoji-java | java | partial | 🟢 clean | 0 | 0 | 13/13 | 523 |
+| thc-hydra | c | impossible | 🟠 partial | 1 | 125 | 85/85 | 5976 |
+| ky | typescript | clean | 🟠 partial | 162 | 1 | 52/52 | 1365 |
+| clifx | csharp | partial | 🟠 partial | 138 | 77 | 115/115 | 7290 |
 
 _impossible repos are shown but excluded from the clean-rate denominator._
 
