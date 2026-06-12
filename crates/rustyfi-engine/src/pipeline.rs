@@ -694,8 +694,8 @@ where
     );
 
     let mut best_contracts = contracts.clone();
-    // (issue_count, contracts_snapshot) for every round that produced issues.
-    let mut round_snapshots: Vec<(usize, Vec<PackageContract>)> = Vec::new();
+    // (issue_count, failing_root_names, contracts_snapshot) for every round that produced issues.
+    let mut round_snapshots: Vec<(usize, Vec<String>, Vec<PackageContract>)> = Vec::new();
 
     'validation: for round in 1..=3usize {
         let issues =
@@ -718,26 +718,28 @@ where
         }
 
         // Record this round's snapshot so we can restore the best one later.
-        round_snapshots.push((issues.len(), best_contracts.clone()));
+        let round_failing: Vec<String> = issues.iter().map(|i| i.root_segment.clone()).collect();
+        round_snapshots.push((issues.len(), round_failing, best_contracts.clone()));
 
         if round == 3 {
             // All retries exhausted — restore the round with the fewest issues
             // (ties → earliest round, i.e. the minimum by stable sort).
-            if let Some((_, best_snapshot)) = round_snapshots.iter().min_by_key(|(count, _)| *count)
+            if let Some((_, best_failing, best_snapshot)) =
+                round_snapshots.iter().min_by_key(|(count, _, _)| *count)
             {
                 best_contracts = best_snapshot.clone();
+                // Report failing packages from the best round (not the last round).
+                let failing: Vec<&str> = best_failing.iter().map(String::as_str).collect();
+                emit(
+                    progress_cb,
+                    Progress::Note {
+                        message: format!(
+                            "⚠ contract for {} couldn't be fully validated — proceeding",
+                            failing.join(", ")
+                        ),
+                    },
+                );
             }
-            // Report failing packages from the best round.
-            let failing: Vec<&str> = issues.iter().map(|i| i.root_segment.as_str()).collect();
-            emit(
-                progress_cb,
-                Progress::Note {
-                    message: format!(
-                        "⚠ contract for {} couldn't be fully validated — proceeding",
-                        failing.join(", ")
-                    ),
-                },
-            );
             break 'validation;
         }
 

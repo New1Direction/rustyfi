@@ -115,7 +115,6 @@ pub fn stub_bodies(sigs: &str) -> String {
     let mut depth: i32 = 0;
     let mut in_str = false;
     let mut in_char = false;
-    let mut prev_char = '\0';
 
     let chars: Vec<char> = sigs.chars().collect();
     let n = chars.len();
@@ -187,7 +186,6 @@ pub fn stub_bodies(sigs: &str) -> String {
             }
         }
 
-        prev_char = c;
         i += 1;
     }
 
@@ -198,7 +196,6 @@ pub fn stub_bodies(sigs: &str) -> String {
         result.push('\n');
     }
 
-    let _ = prev_char; // suppress unused warning
     result
 }
 
