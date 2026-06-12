@@ -5,6 +5,7 @@
 //! trait used behind Box<dyn …>) multiplies into dozens of errors. cargo is
 //! the oracle — same principle as the rustfix pass, moved upstream.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -17,6 +18,72 @@ use crate::EngineError;
 // Error codes that indicate unresolved external-world items (import/path/trait/type
 // resolution) — not the contract's structural fault; ignore them.
 const IMPORT_CODES: &[&str] = &["E0432", "E0433", "E0405", "E0412"];
+
+// ---------------------------------------------------------------------------
+// Item-inventory helpers (item-preserving contract regeneration)
+// ---------------------------------------------------------------------------
+
+/// Parse `contract_rust` with `syn` and return the names of all top-level
+/// items (fn, struct, enum, trait, type alias, const) plus trait method names
+/// as `"TraitName::method_name"`.
+///
+/// On parse failure returns an empty set — callers must treat that as "unknown"
+/// and should not reject the regeneration solely on this basis.
+pub fn item_names(contract_rust: &str) -> BTreeSet<String> {
+    let file = match syn::parse_str::<syn::File>(contract_rust) {
+        Ok(f) => f,
+        Err(_) => return BTreeSet::new(),
+    };
+
+    let mut names = BTreeSet::new();
+    for item in &file.items {
+        match item {
+            syn::Item::Fn(f) => {
+                names.insert(f.sig.ident.to_string());
+            }
+            syn::Item::Struct(s) => {
+                names.insert(s.ident.to_string());
+            }
+            syn::Item::Enum(e) => {
+                names.insert(e.ident.to_string());
+            }
+            syn::Item::Trait(t) => {
+                let trait_name = t.ident.to_string();
+                names.insert(trait_name.clone());
+                // Collect trait method names as "TraitName::method_name".
+                for trait_item in &t.items {
+                    if let syn::TraitItem::Fn(m) = trait_item {
+                        names.insert(format!("{}::{}", trait_name, m.sig.ident));
+                    }
+                }
+            }
+            syn::Item::Type(t) => {
+                names.insert(t.ident.to_string());
+            }
+            syn::Item::Const(c) => {
+                names.insert(c.ident.to_string());
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+/// Returns `false` iff the old item set was non-empty AND the regenerated
+/// contract dropped more than 10% of the original items (additions are fine;
+/// exactly at the 10% threshold is acceptable).
+///
+/// Formally: `false` when `old.len() > 0 && dropped > old.len() / 10`
+/// (integer division, so 1-of-10 = drop of 1 item is ACCEPTED).
+pub fn regeneration_acceptable(old: &BTreeSet<String>, new: &BTreeSet<String>) -> bool {
+    if old.is_empty() {
+        return true;
+    }
+    let dropped = old.difference(new).count();
+    // Threshold: dropped must NOT exceed 10% of original count.
+    // Integer arithmetic: `dropped * 10 > old.len()` ↔ dropped > old.len() / 10.
+    dropped * 10 <= old.len()
+}
 
 /// A compiler-validation failure for one package's contract.
 pub struct ContractIssue {
@@ -608,6 +675,133 @@ mod tests {
         let roots = vec!["storage".to_string()];
         let issues = attribute_issues(&diags, &roots);
         assert!(issues.is_empty(), "warnings should be ignored");
+    }
+
+    // ── item_names ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn item_names_collects_all_kinds() {
+        let contract = r#"
+pub struct Foo { pub x: i32 }
+pub enum Bar { A, B }
+pub trait Baz { fn baz_method(&self) -> i32; }
+pub fn standalone() -> bool { true }
+pub type MyAlias = String;
+pub const MY_CONST: u32 = 42;
+"#;
+        let names = item_names(contract);
+        assert!(names.contains("Foo"), "should contain Foo; got {names:?}");
+        assert!(names.contains("Bar"), "should contain Bar; got {names:?}");
+        assert!(names.contains("Baz"), "should contain Baz; got {names:?}");
+        assert!(
+            names.contains("Baz::baz_method"),
+            "should contain Baz::baz_method; got {names:?}"
+        );
+        assert!(
+            names.contains("standalone"),
+            "should contain standalone; got {names:?}"
+        );
+        assert!(
+            names.contains("MyAlias"),
+            "should contain MyAlias; got {names:?}"
+        );
+        assert!(
+            names.contains("MY_CONST"),
+            "should contain MY_CONST; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn item_names_returns_empty_on_parse_failure() {
+        let names = item_names("this is not valid rust @@@@");
+        assert!(
+            names.is_empty(),
+            "parse failure should yield empty set; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn item_names_collects_multiple_trait_methods() {
+        let contract = r#"
+pub trait Provider {
+    fn get(&self) -> String;
+    fn set(&mut self, v: String);
+}
+"#;
+        let names = item_names(contract);
+        assert!(names.contains("Provider"), "{names:?}");
+        assert!(names.contains("Provider::get"), "{names:?}");
+        assert!(names.contains("Provider::set"), "{names:?}");
+    }
+
+    // ── regeneration_acceptable ────────────────────────────────────────────
+
+    #[test]
+    fn regen_empty_old_is_always_acceptable() {
+        let old = BTreeSet::new();
+        let new = BTreeSet::from(["Foo".to_string()]);
+        assert!(
+            regeneration_acceptable(&old, &new),
+            "empty old should always be acceptable"
+        );
+    }
+
+    #[test]
+    fn regen_superset_is_acceptable() {
+        let old: BTreeSet<String> = ["Foo", "Bar", "Baz"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // new has everything old had plus extra
+        let new: BTreeSet<String> = ["Foo", "Bar", "Baz", "Extra"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert!(
+            regeneration_acceptable(&old, &new),
+            "superset should be acceptable"
+        );
+    }
+
+    #[test]
+    fn regen_drop_1_of_20_is_acceptable() {
+        // 1/20 = 5% < 10% → acceptable
+        let old: BTreeSet<String> = (0..20).map(|i| format!("Item{i}")).collect();
+        let mut new = old.clone();
+        new.remove("Item0");
+        assert_eq!(old.difference(&new).count(), 1);
+        assert!(
+            regeneration_acceptable(&old, &new),
+            "1 of 20 dropped (5%) should be acceptable"
+        );
+    }
+
+    #[test]
+    fn regen_drop_3_of_20_is_rejected() {
+        // 3/20 = 15% > 10% → rejected
+        let old: BTreeSet<String> = (0..20).map(|i| format!("Item{i}")).collect();
+        let mut new = old.clone();
+        new.remove("Item0");
+        new.remove("Item1");
+        new.remove("Item2");
+        assert_eq!(old.difference(&new).count(), 3);
+        assert!(
+            !regeneration_acceptable(&old, &new),
+            "3 of 20 dropped (15%) should be rejected"
+        );
+    }
+
+    #[test]
+    fn regen_exactly_at_10_percent_is_acceptable() {
+        // 1 of 10 = exactly 10% → acceptable (threshold is strict >10%)
+        let old: BTreeSet<String> = (0..10).map(|i| format!("Item{i}")).collect();
+        let mut new = old.clone();
+        new.remove("Item0");
+        assert_eq!(old.difference(&new).count(), 1);
+        assert!(
+            regeneration_acceptable(&old, &new),
+            "1 of 10 (exactly 10%) should be acceptable"
+        );
     }
 
     // ── B3: e2e test (requires cargo) ─────────────────────────────────────

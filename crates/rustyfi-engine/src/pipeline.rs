@@ -759,6 +759,14 @@ where
                 .unwrap_or("");
             let prev_contract = format!("{}\n{}", contract.data_surface, contract.signatures);
 
+            // Compute the item inventory of the CURRENT (old) contract so we can
+            // (a) hand it to the model as a "must not drop" list, and
+            // (b) reject the regeneration if it drops >10% of the API surface.
+            let old_names = crate::contract_check::item_names(&prev_contract);
+            let mut sorted_names: Vec<&str> = old_names.iter().map(String::as_str).collect();
+            sorted_names.sort_unstable();
+            let original_items_list = sorted_names.join("\n");
+
             emit(
                 progress_cb,
                 Progress::Note {
@@ -775,6 +783,7 @@ where
                 labeled,
                 &prev_contract,
                 &issue.errors,
+                &original_items_list,
             );
             let model = if std::env::var("RUSTYFI_NO_TIER").is_ok() {
                 None
@@ -802,6 +811,24 @@ where
             let repaired =
                 crate::scaffold::repair_module_refs(&data_surface, &contract.package, package_map);
             let data = crate::dedup_items::dedup_top_level_items(&repaired);
+
+            // Acceptance check: reject the regeneration if it dropped >10% of items.
+            let new_combined = format!("{data}\n{signatures}");
+            let new_names = crate::contract_check::item_names(&new_combined);
+            if !crate::contract_check::regeneration_acceptable(&old_names, &new_names) {
+                let dropped = old_names.difference(&new_names).count();
+                emit(
+                    progress_cb,
+                    Progress::Note {
+                        message: format!(
+                            "Regenerated contract for '{}' dropped {dropped} item(s) — keeping the original.",
+                            contract.package
+                        ),
+                    },
+                );
+                // Do NOT update new_contracts — keep the old contract for this package.
+                continue;
+            }
 
             if let Some(entry) = new_contracts
                 .iter_mut()

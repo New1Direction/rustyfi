@@ -642,15 +642,29 @@ pub fn prompt_extract_contract(pkg: &str, lang: &str, labeled_source: &str) -> S
 }
 
 /// Build the contract-retry prompt: like `prompt_extract_contract` but includes
-/// the previous (failed) contract and the compiler errors it produced, plus
-/// targeted object-safety instructions.
+/// the previous (failed) contract, the compiler errors it produced, targeted
+/// object-safety instructions, AND an explicit inventory of items the corrected
+/// contract must not drop.
+///
+/// `original_items` is a pre-sorted, newline-separated list of item names
+/// (as produced by `contract_check::item_names`) from the previous contract.
+/// Pass an empty string when the inventory is unavailable.
 pub fn prompt_extract_contract_retry(
     pkg: &str,
     lang: &str,
     labeled_source: &str,
     previous_contract: &str,
     compiler_errors: &str,
+    original_items: &str,
 ) -> String {
+    let items_section = if original_items.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nThe corrected API MUST still define ALL of these items (do not drop any):\n{original_items}\n"
+        )
+    };
+
     format!(
         "Extract the canonical Rust public API surface for the `{pkg}` package \
          (written in {lang}). Emit complete `pub struct`/`enum`/`trait` definitions \
@@ -660,7 +674,7 @@ pub fn prompt_extract_contract_retry(
          Compiler errors:\n```\n{compiler_errors}\n```\n\n\
          Fix ONLY the structural problems shown. If a trait is used as `dyn Trait` it \
          must be object-safe: no generic methods, no Self-returning methods without \
-         `where Self: Sized`. Re-emit the COMPLETE corrected API."
+         `where Self: Sized`. Re-emit the COMPLETE corrected API.{items_section}"
     )
 }
 
@@ -935,6 +949,7 @@ mod tests {
             "// go source",
             "pub trait Provider { fn get<T>(&self) -> T; }",
             "error[E0038]: the trait `Provider` is not object-safe",
+            "",
         );
         assert!(
             p.contains("pub trait Provider"),
@@ -950,6 +965,7 @@ mod tests {
             "// go source",
             "pub trait Provider {}",
             "error[E0038]: object-safety violation",
+            "",
         );
         assert!(
             p.contains("error[E0038]: object-safety violation"),
@@ -965,6 +981,7 @@ mod tests {
             "// go source",
             "pub trait T {}",
             "some error",
+            "",
         );
         assert!(
             p.contains("object-safe"),
@@ -973,6 +990,42 @@ mod tests {
         assert!(
             p.contains("no generic methods"),
             "should mention generic methods: {p}"
+        );
+    }
+
+    #[test]
+    fn retry_prompt_contains_item_inventory_section() {
+        let items = "Foo\nBar\nBaz::method";
+        let p = prompt_extract_contract_retry(
+            "storage",
+            "go",
+            "// go source",
+            "pub struct Foo {}",
+            "some error",
+            items,
+        );
+        assert!(
+            p.contains("The corrected API MUST still define ALL of these items"),
+            "should contain items section header: {p}"
+        );
+        assert!(p.contains("Foo"), "should contain item Foo: {p}");
+        assert!(p.contains("Bar"), "should contain item Bar: {p}");
+        assert!(p.contains("Baz::method"), "should contain Baz::method: {p}");
+    }
+
+    #[test]
+    fn retry_prompt_omits_item_section_when_inventory_empty() {
+        let p = prompt_extract_contract_retry(
+            "storage",
+            "go",
+            "// go source",
+            "pub struct Foo {}",
+            "some error",
+            "",
+        );
+        assert!(
+            !p.contains("MUST still define ALL of these items"),
+            "items section should be absent when inventory is empty: {p}"
         );
     }
 
