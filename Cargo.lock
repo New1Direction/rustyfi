@@ -1554,6 +1554,7 @@ dependencies = [
  "console",
  "indicatif",
  "rustyfi-engine",
+ "serde_json",
  "tempfile",
  "walkdir",
  "zip",
