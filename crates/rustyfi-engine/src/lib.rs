@@ -1,3 +1,4 @@
+pub mod agent_fix;
 pub mod analysis;
 pub mod checkpoint;
 pub mod chunker;
