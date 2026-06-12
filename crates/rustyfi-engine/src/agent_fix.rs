@@ -266,6 +266,10 @@ impl DoctorSession {
 
         // Count error-level diagnostics.
         let diags = parse_cargo_diagnostics(&output).unwrap_or_default();
+        // `== Error` here (the count the model sees) vs the pipeline's `>= Error`
+        // keep/revert criterion: ICEs are excluded from the model-facing count on
+        // purpose — the model can't fix a compiler crash, but the pipeline still
+        // counts it when judging whether to keep the doctor's changes.
         let error_count = diags
             .iter()
             .filter(|d| d.level == rustyfi_core::state::DiagnosticLevel::Error)

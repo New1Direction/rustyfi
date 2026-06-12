@@ -297,32 +297,33 @@ where
     };
 
     // ── Phase 4: Verification + targeted fix loop ─────────────────────────
-    let (verification_cp, deep_fix) = if let Some(cp) = store.read::<VerificationCheckpoint>("verification") {
-        emit(
-            &mut progress_cb,
-            Progress::PhaseResumed {
-                phase: "verification".into(),
-            },
-        );
-        // On a resumed run the doctor pass was already complete (or skipped);
-        // we do not re-run it.  deep_fix is only set on a fresh verification.
-        (cp, None)
-    } else {
-        emit(
-            &mut progress_cb,
-            Progress::StateChanged { state: "Verifying" },
-        );
-        let (cp, df) = phase_verify(
-            &config,
-            fix_llm.as_ref().unwrap_or(&llm),
-            &scaffold_cp,
-            &translation_cp,
-            &package_map,
-            &mut progress_cb,
-        )?;
-        store.write("verification", &cp)?;
-        (cp, df)
-    };
+    let (verification_cp, deep_fix) =
+        if let Some(cp) = store.read::<VerificationCheckpoint>("verification") {
+            emit(
+                &mut progress_cb,
+                Progress::PhaseResumed {
+                    phase: "verification".into(),
+                },
+            );
+            // On a resumed run the doctor pass was already complete (or skipped);
+            // we do not re-run it.  deep_fix is only set on a fresh verification.
+            (cp, None)
+        } else {
+            emit(
+                &mut progress_cb,
+                Progress::StateChanged { state: "Verifying" },
+            );
+            let (cp, df) = phase_verify(
+                &config,
+                fix_llm.as_ref().unwrap_or(&llm),
+                &scaffold_cp,
+                &translation_cp,
+                &package_map,
+                &mut progress_cb,
+            )?;
+            store.write("verification", &cp)?;
+            (cp, df)
+        };
 
     // ── Completion report ─────────────────────────────────────────────────
     // Tell the user exactly what's left to make the crate compile — system
@@ -1660,20 +1661,15 @@ where
                 emit(
                     progress_cb,
                     Progress::Note {
-                        message: format!(
-                            "🩺 doctor: skipping — could not snapshot workspace: {e}"
-                        ),
+                        message: format!("🩺 doctor: skipping — could not snapshot workspace: {e}"),
                     },
                 );
             }
             Ok(snap) => {
                 let mut transport = crate::agent_fix::LlmTransport(llm);
-                let report = crate::agent_fix::run_doctor(
-                    ws,
-                    &mut transport,
-                    budget,
-                    &mut |msg| emit(progress_cb, Progress::Note { message: msg }),
-                );
+                let report = crate::agent_fix::run_doctor(ws, &mut transport, budget, &mut |msg| {
+                    emit(progress_cb, Progress::Note { message: msg })
+                });
 
                 // After run_doctor the workspace is in the doctor's final state.
                 // Run a fresh cargo check so our local `exit_clean`,
@@ -1724,7 +1720,8 @@ where
                         // SAFETY: this runs after the restore copy loop completes;
                         // if restore_src failed we still re-check to get an honest count.
                         if let Some(post_revert) = cargo_check_opt(ws) {
-                            let post_diags = parse_cargo_diagnostics(&post_revert).unwrap_or_default();
+                            let post_diags =
+                                parse_cargo_diagnostics(&post_revert).unwrap_or_default();
                             final_error_count = post_diags
                                 .iter()
                                 .filter(|d| d.level >= rustyfi_core::state::DiagnosticLevel::Error)
@@ -1743,7 +1740,15 @@ where
                         tool_calls: report.tool_calls_used,
                     });
                 } else {
-                    // cargo check unavailable after doctor — restore to be safe and skip summary.
+                    // cargo check unavailable after doctor — restore to be safe.
+                    emit(
+                        progress_cb,
+                        Progress::Note {
+                            message: "🩺 doctor: couldn't re-verify with cargo afterwards — \
+                                      changes reverted, pre-doctor state kept."
+                                .into(),
+                        },
+                    );
                     let _ = restore_src(ws, &snap);
                 }
             }
@@ -1805,8 +1810,8 @@ where
 /// (dropping it deletes the snapshot).
 pub fn snapshot_src(ws: &Path) -> Result<TempDir, EngineError> {
     let src = ws.join("src");
-    let snap = TempDir::new()
-        .map_err(|e| EngineError::Io(format!("snapshot: create tempdir: {e}")))?;
+    let snap =
+        TempDir::new().map_err(|e| EngineError::Io(format!("snapshot: create tempdir: {e}")))?;
     let snap_src = snap.path().join("src");
     fs::create_dir_all(&snap_src)
         .map_err(|e| EngineError::Io(format!("snapshot: create snap/src: {e}")))?;
@@ -1821,15 +1826,17 @@ pub fn snapshot_src(ws: &Path) -> Result<TempDir, EngineError> {
             let dest = snap_src.join(rel);
 
             if entry.file_type().is_dir() {
-                fs::create_dir_all(&dest)
-                    .map_err(|e| EngineError::Io(format!("snapshot: mkdir {}: {e}", dest.display())))?;
+                fs::create_dir_all(&dest).map_err(|e| {
+                    EngineError::Io(format!("snapshot: mkdir {}: {e}", dest.display()))
+                })?;
             } else if entry.file_type().is_file() {
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent)
                         .map_err(|e| EngineError::Io(format!("snapshot: mkdir parent: {e}")))?;
                 }
-                fs::copy(entry.path(), &dest)
-                    .map_err(|e| EngineError::Io(format!("snapshot: copy {}: {e}", entry.path().display())))?;
+                fs::copy(entry.path(), &dest).map_err(|e| {
+                    EngineError::Io(format!("snapshot: copy {}: {e}", entry.path().display()))
+                })?;
             }
         }
     }
@@ -1853,8 +1860,7 @@ pub fn restore_src(ws: &Path, snap: &TempDir) -> Result<(), EngineError> {
         fs::remove_dir_all(&src)
             .map_err(|e| EngineError::Io(format!("restore: remove_dir_all src: {e}")))?;
     }
-    fs::create_dir_all(&src)
-        .map_err(|e| EngineError::Io(format!("restore: create src: {e}")))?;
+    fs::create_dir_all(&src).map_err(|e| EngineError::Io(format!("restore: create src: {e}")))?;
 
     // Copy the snapshot back.
     if snap_src.is_dir() {
@@ -1867,15 +1873,17 @@ pub fn restore_src(ws: &Path, snap: &TempDir) -> Result<(), EngineError> {
             let dest = src.join(rel);
 
             if entry.file_type().is_dir() {
-                fs::create_dir_all(&dest)
-                    .map_err(|e| EngineError::Io(format!("restore: mkdir {}: {e}", dest.display())))?;
+                fs::create_dir_all(&dest).map_err(|e| {
+                    EngineError::Io(format!("restore: mkdir {}: {e}", dest.display()))
+                })?;
             } else if entry.file_type().is_file() {
                 if let Some(parent) = dest.parent() {
                     fs::create_dir_all(parent)
                         .map_err(|e| EngineError::Io(format!("restore: mkdir parent: {e}")))?;
                 }
-                fs::copy(entry.path(), &dest)
-                    .map_err(|e| EngineError::Io(format!("restore: copy {}: {e}", entry.path().display())))?;
+                fs::copy(entry.path(), &dest).map_err(|e| {
+                    EngineError::Io(format!("restore: copy {}: {e}", entry.path().display()))
+                })?;
             }
         }
     }
@@ -2983,8 +2991,14 @@ rstest = "0.18"
         let (_tmp, ws) = make_src_tree();
         let snap = snapshot_src(&ws).expect("snapshot_src failed");
         // Snapshot must contain all three files.
-        assert!(snap.path().join("src/lib.rs").exists(), "lib.rs missing from snapshot");
-        assert!(snap.path().join("src/util.rs").exists(), "util.rs missing from snapshot");
+        assert!(
+            snap.path().join("src/lib.rs").exists(),
+            "lib.rs missing from snapshot"
+        );
+        assert!(
+            snap.path().join("src/util.rs").exists(),
+            "util.rs missing from snapshot"
+        );
         assert!(
             snap.path().join("src/sub/mod.rs").exists(),
             "sub/mod.rs missing from snapshot"
@@ -3010,8 +3024,7 @@ rstest = "0.18"
         // lib.rs must be back to original.
         let lib_content = fs::read_to_string(ws.join("src/lib.rs")).unwrap();
         assert_eq!(
-            lib_content,
-            "pub fn hello() {}\n",
+            lib_content, "pub fn hello() {}\n",
             "lib.rs not restored correctly"
         );
         // new_file.rs must be gone (the restore wipes src/ first).
@@ -3020,7 +3033,10 @@ rstest = "0.18"
             "new_file.rs should have been wiped by restore"
         );
         // Original nested file must still be present.
-        assert!(ws.join("src/sub/mod.rs").exists(), "sub/mod.rs missing after restore");
+        assert!(
+            ws.join("src/sub/mod.rs").exists(),
+            "sub/mod.rs missing after restore"
+        );
         let sub_content = fs::read_to_string(ws.join("src/sub/mod.rs")).unwrap();
         assert_eq!(sub_content, "pub fn sub_fn() {}\n");
     }
@@ -3032,14 +3048,26 @@ rstest = "0.18"
 
         // Simulate a catastrophic delete (what happens if a bad doctor run removes files).
         fs::remove_dir_all(ws.join("src")).unwrap();
-        assert!(!ws.join("src").exists(), "src should be gone before restore");
+        assert!(
+            !ws.join("src").exists(),
+            "src should be gone before restore"
+        );
 
         restore_src(&ws, &snap).expect("restore_src failed");
 
         // All files must be restored.
-        assert!(ws.join("src/lib.rs").exists(), "lib.rs missing after full restore");
-        assert!(ws.join("src/util.rs").exists(), "util.rs missing after full restore");
-        assert!(ws.join("src/sub/mod.rs").exists(), "sub/mod.rs missing after full restore");
+        assert!(
+            ws.join("src/lib.rs").exists(),
+            "lib.rs missing after full restore"
+        );
+        assert!(
+            ws.join("src/util.rs").exists(),
+            "util.rs missing after full restore"
+        );
+        assert!(
+            ws.join("src/sub/mod.rs").exists(),
+            "sub/mod.rs missing after full restore"
+        );
     }
 
     #[test]
