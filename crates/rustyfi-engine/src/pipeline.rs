@@ -682,7 +682,10 @@ where
     }
 
     // Phase 2: compiler-validate all contracts via a throwaway skeleton crate.
-    // Max 2 retry rounds (initial check + 2 retries = up to 3 total cargo runs).
+    // Rounds 1–3: initial check + up to 2 regenerate→recheck retries (3 cargo
+    // runs total).  After each check we record (issue_count, snapshot); when the
+    // loop ends without reaching zero issues we restore the snapshot with the
+    // fewest issues (ties → earliest round).
     emit(
         progress_cb,
         Progress::Note {
@@ -691,8 +694,10 @@ where
     );
 
     let mut best_contracts = contracts.clone();
+    // (issue_count, contracts_snapshot) for every round that produced issues.
+    let mut round_snapshots: Vec<(usize, Vec<PackageContract>)> = Vec::new();
 
-    'validation: for round in 1..=2usize {
+    'validation: for round in 1..=3usize {
         let issues =
             match crate::contract_check::check_contracts(&best_contracts, &scaffold.crate_name) {
                 Ok(v) => v,
@@ -712,8 +717,17 @@ where
             break 'validation;
         }
 
-        if round == 2 {
-            // Last retry — report which packages remain unvalidated and stop.
+        // Record this round's snapshot so we can restore the best one later.
+        round_snapshots.push((issues.len(), best_contracts.clone()));
+
+        if round == 3 {
+            // All retries exhausted — restore the round with the fewest issues
+            // (ties → earliest round, i.e. the minimum by stable sort).
+            if let Some((_, best_snapshot)) = round_snapshots.iter().min_by_key(|(count, _)| *count)
+            {
+                best_contracts = best_snapshot.clone();
+            }
+            // Report failing packages from the best round.
             let failing: Vec<&str> = issues.iter().map(|i| i.root_segment.as_str()).collect();
             emit(
                 progress_cb,
