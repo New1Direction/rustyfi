@@ -626,10 +626,15 @@ pub struct DoctorReport {
 /// so that tests can inject a scripted sequence of turns without hitting the
 /// network.
 ///
-/// Implementors are responsible for:
-/// 1. Calling the underlying model with the current `conversation` and `tools`.
-/// 2. Appending the raw assistant message returned by the model to `conversation`
-///    so that tool_call_id values round-trip correctly in subsequent turns.
+/// **Contract**: `turn()` MUST leave the assistant's own message appended to
+/// `conversation` before returning.  This invariant is what allows the driver
+/// to extract `tool_call_id` values from the last message and build proper
+/// `{role:"tool"}` result messages.  The driver never pushes assistant messages
+/// itself — that responsibility belongs entirely to the transport.
+///
+/// For `LlmTransport` the raw API message is verbatim-appended so that
+/// `tool_call_id` values round-trip correctly.  For `ScriptedTransport` a
+/// synthetic assistant message is synthesised from the scripted turn.
 pub trait DoctorTransport {
     fn turn(
         &mut self,
@@ -760,7 +765,10 @@ pub const SYSTEM_DOCTOR: &str = concat!(
     "2. Prefer minimal, surgical edits; change only what is broken.\n",
     "3. After every WriteFile call, run CargoCheck to confirm the error count improved.\n",
     "4. Call Done when the crate is clean OR when you are stuck and cannot make further progress.\n",
-    "5. Never skip a CargoCheck after a write — confirm improvement before moving on.",
+    "5. Never skip a CargoCheck after a write — confirm improvement before moving on.\n",
+    "6. If native tool calling is unavailable, reply with exactly one JSON object: ",
+    r#"{"tool": "...", "args": {...}} "#,
+    "— valid tool names: list_files, read_file, search, cargo_check, explain, write_file, done.",
 );
 
 /// Convert a `ToolCall` name (as returned by the model's tool_calls field) and
@@ -957,15 +965,68 @@ pub fn run_doctor(
                 }
             }
             AssistantTurn::Text(text) => {
-                // Model sent plain text instead of a tool call — nudge it.
-                conversation.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": text
-                }));
-                conversation.push(serde_json::json!({
-                    "role": "user",
-                    "content": "Please use a tool to continue, or call the done tool if you are finished."
-                }));
+                // The transport has already appended the assistant message to
+                // `conversation` (see DoctorTransport contract).  The driver
+                // must NOT push a second assistant message here.
+
+                // Attempt to parse a JSON-encoded action from the text before
+                // falling back to a nudge.  Some models (or endpoints without
+                // native tool-calling support) embed the action as JSON prose.
+                //
+                // Note: this path has no tool_call_id machinery — the tool
+                // result is injected as a plain {role:"user"} message rather
+                // than a {role:"tool"} message.  This is the documented
+                // simplification for the JSON-fallback path.
+                match parse_action_reply(&text) {
+                    Ok(tool_call) => {
+                        let name = match &tool_call {
+                            ToolCall::ListFiles => "list_files",
+                            ToolCall::ReadFile { .. } => "read_file",
+                            ToolCall::Search { .. } => "search",
+                            ToolCall::CargoCheck => "cargo_check",
+                            ToolCall::Explain { .. } => "explain",
+                            ToolCall::WriteFile { .. } => "write_file",
+                            ToolCall::Done { .. } => "done",
+                        };
+
+                        // Done is terminal — capture summary and break.
+                        if let ToolCall::Done {
+                            summary: ref done_summary,
+                        } = tool_call
+                        {
+                            summary = done_summary.clone();
+                            progress_cb(format!("doctor: {name} … (json-fallback)"));
+                            session.execute(tool_call);
+                            break;
+                        }
+
+                        progress_cb(format!("doctor: {name} … (json-fallback)"));
+                        let outcome = session.execute(tool_call);
+
+                        // JSON-fallback has no tool_call_id — use a plain user
+                        // message as the tool result (documented simplification).
+                        conversation.push(serde_json::json!({
+                            "role": "user",
+                            "content": format!("tool result:\n{}", outcome.payload)
+                        }));
+
+                        if outcome.is_terminal {
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // Plain text with no parseable action — nudge the model
+                        // and teach it the expected JSON format.
+                        conversation.push(serde_json::json!({
+                            "role": "user",
+                            "content": concat!(
+                                "Please use a tool to continue, or call the done tool if you are finished. ",
+                                r#"Reply with exactly one tool action as JSON: {"tool": "<name>", "args": {…}} "#,
+                                "— or use native tool calling."
+                            )
+                        }));
+                    }
+                }
             }
         }
     }
@@ -1449,10 +1510,15 @@ mod tests {
     /// queue (panics if the queue is empty, which catches test scripts that are
     /// too short).
     ///
-    /// Because there is no real model, there is no raw assistant message to
-    /// append.  The tool_call_id round-trip path in `run_doctor` falls back to
-    /// a `{role:"user"}` message — this is the documented simplification for
-    /// the scripted test path.
+    /// Upholds the `DoctorTransport` contract: `turn()` appends a synthesised
+    /// assistant message to `conversation` before returning so the driver never
+    /// needs to push one.
+    ///
+    /// For `ToolInvocation` turns a minimal `{role:"assistant","tool_calls":[…]}`
+    /// stub is appended.  For `Text` turns a `{role:"assistant","content":"…"}`
+    /// message is appended.  The tool_call_id round-trip path in `run_doctor`
+    /// falls back to a `{role:"user"}` result message when the id is absent —
+    /// this is the documented simplification for the scripted test path.
     struct ScriptedTransport(std::collections::VecDeque<AssistantTurn>);
 
     impl ScriptedTransport {
@@ -1464,13 +1530,80 @@ mod tests {
     impl DoctorTransport for ScriptedTransport {
         fn turn(
             &mut self,
-            _conversation: &mut Vec<serde_json::Value>,
+            conversation: &mut Vec<serde_json::Value>,
             _tools: &serde_json::Value,
         ) -> Result<AssistantTurn, EngineError> {
-            self.0
+            let turn = self
+                .0
                 .pop_front()
-                .ok_or_else(|| EngineError::Llm("ScriptedTransport queue exhausted".into()))
+                .ok_or_else(|| EngineError::Llm("ScriptedTransport queue exhausted".into()))?;
+
+            // Uphold the transport contract: append the assistant message BEFORE
+            // returning so the driver sees it as the last message.
+            match &turn {
+                AssistantTurn::ToolInvocation {
+                    name,
+                    arguments_json,
+                } => {
+                    conversation.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "scripted_call",
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": arguments_json
+                            }
+                        }]
+                    }));
+                }
+                AssistantTurn::Text(text) => {
+                    conversation.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": text
+                    }));
+                }
+            }
+
+            Ok(turn)
         }
+    }
+
+    // ── T11b: single assistant message per Text turn ─────────────────────────
+
+    /// After a Text turn via ScriptedTransport the conversation must contain
+    /// exactly ONE assistant message for that turn — no duplicates.
+    #[test]
+    fn scripted_text_turn_produces_exactly_one_assistant_message() {
+        // Build a minimal session / transport setup that we drive manually
+        // rather than through run_doctor, so we can inspect the conversation
+        // slice directly.
+        let (_tmp, _ws) = mini_crate();
+        let tools = tools_schema();
+        let mut conversation: Vec<serde_json::Value> = vec![serde_json::json!({
+            "role": "user",
+            "content": "initial seed"
+        })];
+
+        let mut transport = ScriptedTransport::from(vec![AssistantTurn::Text(
+            "I will look at the files.".to_string(),
+        )]);
+
+        let turn = transport
+            .turn(&mut conversation, &tools)
+            .expect("turn should succeed");
+        assert!(matches!(turn, AssistantTurn::Text(_)), "expected Text turn");
+
+        // Count assistant messages in the conversation.
+        let assistant_count = conversation
+            .iter()
+            .filter(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"))
+            .count();
+        assert_eq!(
+            assistant_count, 1,
+            "expected exactly 1 assistant message after Text turn, got {assistant_count}; conversation: {conversation:?}"
+        );
     }
 
     // ── T11: parse_action_reply ──────────────────────────────────────────────
@@ -1670,6 +1803,65 @@ mod tests {
             "end_errors ({}) should be < start_errors ({})",
             report.end_errors,
             report.start_errors
+        );
+    }
+
+    // ── T13: text turn with embedded JSON action executes the tool ───────────
+
+    /// A Text turn that contains a JSON-encoded action should execute the tool
+    /// and count it in tool_calls_used, not just nudge the model.  The session
+    /// ends when a Text turn encodes `done` as JSON.
+    ///
+    /// Marked #[ignore] because the driver seeds the session with a real
+    /// `cargo check` call, consistent with the suite's convention for tests
+    /// that invoke cargo.
+    #[test]
+    #[ignore]
+    fn text_turn_with_json_action_executes_tool() {
+        let (_tmp, ws) = mini_crate();
+
+        // Script two Text turns, each carrying an embedded JSON action:
+        //   turn 1 → list_files (as JSON prose)
+        //   turn 2 → done      (as JSON prose)
+        // Neither uses native ToolInvocation — the JSON-fallback path should
+        // parse and execute both.
+        let turns = vec![
+            AssistantTurn::Text(
+                r#"Let me start by listing the files. {"tool":"list_files","args":{}}"#.to_string(),
+            ),
+            AssistantTurn::Text(
+                r#"All done. {"tool":"done","args":{"summary":"no errors found"}}"#.to_string(),
+            ),
+        ];
+
+        let mut transport = ScriptedTransport::from(turns);
+        let budget = DoctorBudget {
+            max_tool_calls: 20,
+            max_wall_secs: 300,
+        };
+
+        let mut log: Vec<String> = Vec::new();
+        let report = run_doctor(&ws, &mut transport, budget, &mut |msg| log.push(msg));
+
+        // The driver seeds with CargoCheck (1 call) + list_files (1) + done (1) = 3 total.
+        assert_eq!(
+            report.tool_calls_used, 3,
+            "expected 3 tool calls (1 seed + list_files + done), got {}",
+            report.tool_calls_used
+        );
+
+        // The summary should come from the done action's args.
+        assert_eq!(
+            report.summary, "no errors found",
+            "expected summary from done JSON action, got: {}",
+            report.summary
+        );
+
+        // Both JSON-fallback tool calls should be reflected in the progress log.
+        assert!(
+            log.iter()
+                .any(|m| m.contains("list_files") && m.contains("json-fallback")),
+            "expected a log entry for list_files via json-fallback; log: {log:?}"
         );
     }
 }

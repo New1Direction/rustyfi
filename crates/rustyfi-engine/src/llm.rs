@@ -261,6 +261,7 @@ pub fn build_tools_request_body(
         "temperature": 0.1,
         "max_tokens": 8192,
         "tools": tools,
+        "parallel_tool_calls": false,
         "messages": all_messages,
     })
 }
@@ -1089,6 +1090,11 @@ mod tests {
         assert_eq!(body["model"], "gpt-4o");
         assert_eq!(body["temperature"], 0.1);
         assert_eq!(body["max_tokens"], 8192);
+        // parallel_tool_calls must be false to force single-tool responses.
+        assert_eq!(
+            body["parallel_tool_calls"], false,
+            "parallel_tool_calls must be false"
+        );
         // tools array present.
         assert!(body["tools"].is_array(), "tools must be an array");
     }
