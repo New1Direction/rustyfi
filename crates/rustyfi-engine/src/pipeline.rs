@@ -18,8 +18,8 @@ use crate::checkpoint::{
 use crate::chunker::SemanticChunker;
 use crate::graph::{EdgeRecord, ModuleGraph};
 use crate::llm::{
-    extract_rust_code, prompt_extract_contract, prompt_fix_targeted, prompt_translate_with_context,
-    LlmClient, SYSTEM_CONTRACT, SYSTEM_FIX, SYSTEM_TRANSLATE,
+    extract_rust_code, prompt_extract_contract, prompt_extract_contract_retry, prompt_fix_targeted,
+    prompt_translate_with_context, LlmClient, SYSTEM_CONTRACT, SYSTEM_FIX, SYSTEM_TRANSLATE,
 };
 use crate::scaffold::{package_to_zip, Scaffolder};
 use crate::slicer::OwnershipGraph;
@@ -614,7 +614,12 @@ where
             .push(abs.clone());
     }
 
+    // Phase 1: generate all contracts in memory (no writes yet), retaining the
+    // labeled source per package for use in retry prompts.
     let mut contracts: Vec<PackageContract> = Vec::new();
+    // Keyed by root_segment: the labeled source used to generate this contract.
+    let mut labeled_by_root: HashMap<String, String> = HashMap::new();
+
     for (root, (pkg, files)) in by_pkg {
         // Concatenate the package's source (path-labelled) up to the budget.
         let mut labeled = String::new();
@@ -661,12 +666,12 @@ where
         };
 
         let (data_surface, signatures) = crate::slicer::split_contract(&contract_rust);
-        // The data surface is authoritative: rewrite cross-package refs, dedup,
-        // and write it once into the package's mod.rs.
+        // The data surface is authoritative: rewrite cross-package refs, dedup.
+        // Do NOT write yet — validation happens first.
         let repaired = crate::scaffold::repair_module_refs(&data_surface, &pkg, package_map);
         let data = crate::dedup_items::dedup_top_level_items(&repaired);
-        let _ = scaffolder.write_package_contract(&root, &data);
 
+        labeled_by_root.insert(root.clone(), labeled);
         contracts.push(PackageContract {
             root_segment: root,
             package: pkg,
@@ -676,13 +681,139 @@ where
         });
     }
 
+    // Phase 2: compiler-validate all contracts via a throwaway skeleton crate.
+    // Max 2 retry rounds (initial check + 2 retries = up to 3 total cargo runs).
     emit(
         progress_cb,
         Progress::Note {
-            message: format!("Type contract ready for {} package(s).", contracts.len()),
+            message: "Compiler-checking the type contract before translation…".into(),
         },
     );
-    Ok(ContractCheckpoint { contracts })
+
+    let mut best_contracts = contracts.clone();
+
+    'validation: for round in 1..=2usize {
+        let issues =
+            match crate::contract_check::check_contracts(&best_contracts, &scaffold.crate_name) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!("contract validation failed (round {round}): {e}");
+                    break 'validation;
+                }
+            };
+
+        if issues.is_empty() {
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: "Contract validated clean ✓".into(),
+                },
+            );
+            break 'validation;
+        }
+
+        if round == 2 {
+            // Last retry — report which packages remain unvalidated and stop.
+            let failing: Vec<&str> = issues.iter().map(|i| i.root_segment.as_str()).collect();
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: format!(
+                        "⚠ contract for {} couldn't be fully validated — proceeding",
+                        failing.join(", ")
+                    ),
+                },
+            );
+            break 'validation;
+        }
+
+        // Regenerate failing packages with error feedback.
+        let mut new_contracts = best_contracts.clone();
+        for issue in &issues {
+            let Some(contract) = best_contracts
+                .iter()
+                .find(|c| c.root_segment == issue.root_segment)
+            else {
+                continue;
+            };
+            let labeled = labeled_by_root
+                .get(&issue.root_segment)
+                .map(String::as_str)
+                .unwrap_or("");
+            let prev_contract = format!("{}\n{}", contract.data_surface, contract.signatures);
+
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: format!(
+                        "Contract for '{}' failed validation — regenerating (round {round})…",
+                        contract.package
+                    ),
+                },
+            );
+
+            let retry_prompt = prompt_extract_contract_retry(
+                &contract.package,
+                &lang,
+                labeled,
+                &prev_contract,
+                &issue.errors,
+            );
+            let model = if std::env::var("RUSTYFI_NO_TIER").is_ok() {
+                None
+            } else {
+                tier_for_tokens(
+                    estimate_tokens(labeled),
+                    config.tier_fast_tokens,
+                    config.tier_mid_tokens,
+                )
+            };
+            let raw = match model {
+                Some(ref m) => llm.complete_with_model(SYSTEM_CONTRACT, &retry_prompt, m),
+                None => llm.complete(SYSTEM_CONTRACT, &retry_prompt),
+            };
+            let new_rust = match raw {
+                Ok(r) => extract_rust_code(&r),
+                Err(EngineError::Config(msg)) => return Err(EngineError::Config(msg)),
+                Err(e) => {
+                    warn!("contract retry failed for `{}`: {e}", contract.root_segment);
+                    continue;
+                }
+            };
+
+            let (data_surface, signatures) = crate::slicer::split_contract(&new_rust);
+            let repaired =
+                crate::scaffold::repair_module_refs(&data_surface, &contract.package, package_map);
+            let data = crate::dedup_items::dedup_top_level_items(&repaired);
+
+            if let Some(entry) = new_contracts
+                .iter_mut()
+                .find(|c| c.root_segment == issue.root_segment)
+            {
+                entry.data_surface = data;
+                entry.signatures = signatures;
+            }
+        }
+        best_contracts = new_contracts;
+    }
+
+    // Phase 3: write all validated contract surfaces and checkpoint.
+    for contract in &best_contracts {
+        let _ = scaffolder.write_package_contract(&contract.root_segment, &contract.data_surface);
+    }
+
+    emit(
+        progress_cb,
+        Progress::Note {
+            message: format!(
+                "Type contract ready for {} package(s).",
+                best_contracts.len()
+            ),
+        },
+    );
+    Ok(ContractCheckpoint {
+        contracts: best_contracts,
+    })
 }
 
 /// Build the contract context injected into one file's translation prompt:

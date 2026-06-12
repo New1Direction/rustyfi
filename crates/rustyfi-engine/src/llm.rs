@@ -627,6 +627,7 @@ Rules:
 7. Derive `#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]` on plain data structs.
 8. Do NOT emit `use` statements, `mod` declarations, impl blocks, or any logic.
 9. Reference another project package's types by their crate path when needed (e.g. `crate::storage::Store`).
+10. If the API exposes a trait via `Box<dyn …>` or `&dyn …`, that trait MUST be object-safe (no generic methods).
 This is a CONTRACT: it must be complete and stable, because all of this package's files and all its importers will be translated against it verbatim.
 "#;
 
@@ -637,6 +638,29 @@ pub fn prompt_extract_contract(pkg: &str, lang: &str, labeled_source: &str) -> S
          (written in {lang}). Emit complete `pub struct`/`enum`/`trait` definitions \
          (ALL fields/variants) and `pub fn` signature lines only — no bodies, no \
          markdown.\n\nPackage source:\n```{lang}\n{labeled_source}\n```"
+    )
+}
+
+/// Build the contract-retry prompt: like `prompt_extract_contract` but includes
+/// the previous (failed) contract and the compiler errors it produced, plus
+/// targeted object-safety instructions.
+pub fn prompt_extract_contract_retry(
+    pkg: &str,
+    lang: &str,
+    labeled_source: &str,
+    previous_contract: &str,
+    compiler_errors: &str,
+) -> String {
+    format!(
+        "Extract the canonical Rust public API surface for the `{pkg}` package \
+         (written in {lang}). Emit complete `pub struct`/`enum`/`trait` definitions \
+         (ALL fields/variants) and `pub fn` signature lines only — no bodies, no \
+         markdown.\n\nPackage source:\n```{lang}\n{labeled_source}\n```\n\n\
+         Your previous API (did NOT compile):\n```rust\n{previous_contract}\n```\n\n\
+         Compiler errors:\n```\n{compiler_errors}\n```\n\n\
+         Fix ONLY the structural problems shown. If a trait is used as `dyn Trait` it \
+         must be object-safe: no generic methods, no Self-returning methods without \
+         `where Self: Sized`. Re-emit the COMPLETE corrected API."
     )
 }
 
@@ -881,5 +905,68 @@ mod tests {
     fn passes_through_plain_code() {
         let raw = "fn a() -> i32 { 1 }\n";
         assert_eq!(extract_rust_code(raw), "fn a() -> i32 { 1 }");
+    }
+
+    // ── B4: prompt_extract_contract_retry ─────────────────────────────────
+
+    #[test]
+    fn retry_prompt_contains_previous_contract() {
+        let p = prompt_extract_contract_retry(
+            "storage",
+            "go",
+            "// go source",
+            "pub trait Provider { fn get<T>(&self) -> T; }",
+            "error[E0038]: the trait `Provider` is not object-safe",
+        );
+        assert!(
+            p.contains("pub trait Provider"),
+            "should contain previous contract: {p}"
+        );
+    }
+
+    #[test]
+    fn retry_prompt_contains_compiler_errors() {
+        let p = prompt_extract_contract_retry(
+            "storage",
+            "go",
+            "// go source",
+            "pub trait Provider {}",
+            "error[E0038]: object-safety violation",
+        );
+        assert!(
+            p.contains("error[E0038]: object-safety violation"),
+            "should contain compiler errors: {p}"
+        );
+    }
+
+    #[test]
+    fn retry_prompt_contains_object_safety_instruction() {
+        let p = prompt_extract_contract_retry(
+            "storage",
+            "go",
+            "// go source",
+            "pub trait T {}",
+            "some error",
+        );
+        assert!(
+            p.contains("object-safe"),
+            "should contain object-safety instruction: {p}"
+        );
+        assert!(
+            p.contains("no generic methods"),
+            "should mention generic methods: {p}"
+        );
+    }
+
+    #[test]
+    fn system_contract_mentions_object_safety() {
+        assert!(
+            SYSTEM_CONTRACT.contains("object-safe"),
+            "SYSTEM_CONTRACT should mention object-safe"
+        );
+        assert!(
+            SYSTEM_CONTRACT.contains("Box<dyn"),
+            "SYSTEM_CONTRACT should mention Box<dyn>"
+        );
     }
 }
