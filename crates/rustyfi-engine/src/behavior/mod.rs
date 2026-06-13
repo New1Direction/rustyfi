@@ -8,6 +8,9 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
 
+mod harness;
+pub use harness::{build_side, expand, run_case};
+
 /// A full behavioral-equivalence spec (`behavior.yaml`). Self-contained after
 /// golden capture: `cases[].expect` holds the source's captured output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -186,6 +189,14 @@ pub struct Expect {
     #[serde(default)]
     pub stderr: String,
     #[serde(default)]
+    pub exit_code: i32,
+}
+
+/// What one binary actually did on one case (runtime capture).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Outcome {
+    pub stdout: String,
+    pub stderr: String,
     pub exit_code: i32,
 }
 
