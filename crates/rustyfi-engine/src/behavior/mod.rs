@@ -10,10 +10,14 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 mod harness;
-pub use harness::{build_side, expand, run_case};
+// Process/diff primitives are crate-internal — consumers go through the two
+// real entry points (`capture_all`, `verify`) and the miners. `expand` and
+// `normalize_text` are used only within their own submodules, so they are not
+// re-exported here.
+pub(crate) use harness::{build_side, run_case};
 
 mod diff;
-pub use diff::{diff_case, normalize_text};
+pub(crate) use diff::diff_case;
 
 mod mine;
 pub use mine::{help_case, mine_readme};
@@ -217,7 +221,10 @@ fn is_false(b: &bool) -> bool {
 /// the source binary. Each case is run TWICE: if the source disagrees with
 /// itself on any compared stream, the case is flagged `nondeterministic` and
 /// quarantined (its `expect` is left as the first run for visibility, but it is
-/// excluded from gating/repair by `verify`).
+/// excluded from gating/repair by `verify`). "Compared stream" is evaluated
+/// under the case's own compare policy — a stream set to `ignore`, or whose
+/// noise is masked by a `normalize` rule, is intentionally not flagged, and
+/// `verify` later applies the identical policy.
 pub fn capture_all(spec: &mut BehaviorSpec, root: &Path, work: &Path) -> Result<(), String> {
     build_side(&spec.source, "source", root, work)?;
     let default_compare = spec.compare;
