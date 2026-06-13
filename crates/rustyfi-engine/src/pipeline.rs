@@ -1717,9 +1717,10 @@ where
             }
             Ok(snap) => {
                 let mut transport = crate::agent_fix::LlmTransport(llm);
-                let report = crate::agent_fix::run_doctor(ws, &mut transport, budget, &mut |msg| {
-                    emit(progress_cb, Progress::Note { message: msg })
-                });
+                let report =
+                    crate::agent_fix::run_doctor(ws, &mut transport, budget, None, &mut |msg| {
+                        emit(progress_cb, Progress::Note { message: msg })
+                    });
 
                 // After run_doctor the workspace is in the doctor's final state.
                 // Run a fresh cargo check so our local `exit_clean`,

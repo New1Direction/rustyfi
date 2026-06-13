@@ -119,7 +119,6 @@ impl DoctorSession {
     }
 
     /// True when a behavioral corpus is attached.
-    #[allow(dead_code)] // used by run_doctor in Task 2
     pub fn has_behavior(&self) -> bool {
         self.behavior.is_some()
     }
@@ -718,9 +717,12 @@ impl<'a> DoctorTransport for LlmTransport<'a> {
     }
 }
 
-/// OpenAI tool schema for the 7 doctor tools.
-pub fn tools_schema() -> serde_json::Value {
-    serde_json::json!([
+/// OpenAI tool schema for the doctor tools.
+///
+/// Pass `include_behavior = true` to append the `run_behavior_checks` tool
+/// when a behavioral corpus is attached to the session.
+pub fn tools_schema(include_behavior: bool) -> serde_json::Value {
+    let mut tools = serde_json::json!([
         {
             "type": "function",
             "function": {
@@ -808,7 +810,20 @@ pub fn tools_schema() -> serde_json::Value {
                 }
             }
         }
-    ])
+    ]);
+    if include_behavior {
+        if let Some(arr) = tools.as_array_mut() {
+            arr.push(serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": "run_behavior_checks",
+                    "description": "Build and run the translated crate against the behavioral corpus; returns per-case stdout/stderr/exit diffs vs the original. Use after cargo check is clean to find and fix behavioral divergences.",
+                    "parameters": { "type": "object", "properties": {}, "required": [] }
+                }
+            }));
+        }
+    }
+    tools
 }
 
 /// System prompt for the doctor session.
@@ -823,7 +838,10 @@ pub const SYSTEM_DOCTOR: &str = concat!(
     "5. Never skip a CargoCheck after a write — confirm improvement before moving on.\n",
     "6. If native tool calling is unavailable, reply with exactly one JSON object: ",
     r#"{"tool": "...", "args": {...}} "#,
-    "— valid tool names: list_files, read_file, search, cargo_check, explain, write_file, done.",
+    "— valid tool names: list_files, read_file, search, cargo_check, run_behavior_checks, explain, write_file, done.\n",
+    "7. After cargo check is clean, if behavioral mismatches remain, call run_behavior_checks to see which cases diverge from the original, ",
+    "fix the root cause (output formatting, stream routing, off-by-one, logic), and call run_behavior_checks again to confirm. ",
+    "NEVER edit behavior.yaml or change expected values — the original's behavior is ground truth.",
 );
 
 /// Convert a `ToolCall` name (as returned by the model's tool_calls field) and
@@ -884,6 +902,10 @@ fn tool_call_from_native(name: &str, arguments_json: &str) -> Result<ToolCall, S
 
 /// Run a doctor session over `ws` using the given transport.
 ///
+/// `behavior` optionally attaches a behavioral corpus to the session.  When
+/// present the `run_behavior_checks` tool is included in the schema and the
+/// seed message is extended with an initial behavior diff.
+///
 /// `progress_cb` is called with a human-readable status line before each tool
 /// execution.
 ///
@@ -893,15 +915,19 @@ pub fn run_doctor(
     ws: &Path,
     transport: &mut dyn DoctorTransport,
     budget: DoctorBudget,
+    behavior: Option<(crate::behavior::BehaviorSpec, std::path::PathBuf)>,
     progress_cb: &mut dyn FnMut(String),
 ) -> DoctorReport {
     use rustyfi_core::compiler::{parse_cargo_diagnostics, run_cargo_check};
 
     let started = Instant::now();
-    let tools = tools_schema();
+    let tools = tools_schema(behavior.is_some());
 
     // Build the initial session (manages tool execution + budget tracking).
     let mut session = DoctorSession::new(ws, budget);
+    if let Some((spec, work)) = behavior {
+        session = session.with_behavior(spec, work);
+    }
 
     // --- Seed the conversation with the initial cargo check output. ----------
     // Run the first CargoCheck through the session (counts as tool call 1).
@@ -925,6 +951,19 @@ pub fn run_doctor(
         "Current cargo check output:\n```\n{}\n```{}",
         seed_outcome.payload, next_steps_content
     );
+
+    // When a behavioral corpus is attached, run an initial behavior check and
+    // append the results to the seed message so the model starts with full
+    // context (both compile errors and behavioral divergences).
+    let seed_user_msg = if session.has_behavior() {
+        let bc = session.execute(ToolCall::RunBehaviorChecks);
+        format!(
+            "{seed_user_msg}\n\nBehavioral check (the original is ground truth):\n```\n{}\n```",
+            bc.payload
+        )
+    } else {
+        seed_user_msg
+    };
 
     let mut conversation: Vec<serde_json::Value> = vec![serde_json::json!({
         "role": "user",
@@ -1637,7 +1676,7 @@ mod tests {
         // rather than through run_doctor, so we can inspect the conversation
         // slice directly.
         let (_tmp, _ws) = mini_crate();
-        let tools = tools_schema();
+        let tools = tools_schema(false);
         let mut conversation: Vec<serde_json::Value> = vec![serde_json::json!({
             "role": "user",
             "content": "initial seed"
@@ -1837,7 +1876,7 @@ mod tests {
         };
 
         let mut log = Vec::new();
-        let report = run_doctor(&ws, &mut transport, budget, &mut |msg| log.push(msg));
+        let report = run_doctor(&ws, &mut transport, budget, None, &mut |msg| log.push(msg));
 
         // The driver runs the first CargoCheck (1 call) + 3 scripted tool calls = 4 total.
         assert_eq!(
@@ -1898,7 +1937,7 @@ mod tests {
         };
 
         let mut log: Vec<String> = Vec::new();
-        let report = run_doctor(&ws, &mut transport, budget, &mut |msg| log.push(msg));
+        let report = run_doctor(&ws, &mut transport, budget, None, &mut |msg| log.push(msg));
 
         // The driver seeds with CargoCheck (1 call) + list_files (1) + done (1) = 3 total.
         assert_eq!(
@@ -1989,5 +2028,128 @@ mod tests {
     fn parses_run_behavior_checks_action() {
         let t = parse_action_reply(r#"{"tool":"run_behavior_checks","args":{}}"#).unwrap();
         assert!(matches!(t, ToolCall::RunBehaviorChecks));
+    }
+
+    // ── T15: run_doctor scripted behavioral repair (ignored — runs cargo+sh) ──
+
+    /// End-to-end test: a crate that compiles but prints the wrong output is
+    /// repaired by the doctor using the run_behavior_checks tool.
+    ///
+    /// Script: run_behavior_checks (sees mismatch) → write_file (fix main.rs)
+    ///         → run_behavior_checks (now matches) → done
+    ///
+    /// The driver seeds with CargoCheck (1) + initial RunBehaviorChecks (1)
+    /// (because behavior is attached), then 4 scripted turns = 6 total.
+    #[test]
+    #[ignore]
+    fn run_doctor_scripted_behavior_repair() {
+        use crate::behavior::{BehaviorSpec, Case, CompareSpec, Expect, Provenance, Side};
+
+        // ---- Build a crate that compiles but prints "WRONG". ----------------
+        let crate_tmp = tempfile::TempDir::new().unwrap();
+        let crate_dir = crate_tmp.path().to_path_buf();
+        let src = crate_dir.join("src");
+        fs::create_dir_all(&src).unwrap();
+
+        fs::write(
+            crate_dir.join("Cargo.toml"),
+            "[package]\nname = \"btest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\n",
+        )
+        .unwrap();
+        fs::write(src.join("main.rs"), "fn main() { print!(\"WRONG\"); }\n").unwrap();
+
+        // ---- Build a BehaviorSpec expecting "OK". ---------------------------
+        let spec = BehaviorSpec {
+            name: "btest".into(),
+            source: Side {
+                lang: "rust".into(),
+                dir: ".".into(),
+                build: vec![],
+                run: vec![],
+            },
+            target: Side {
+                lang: "rust".into(),
+                dir: ".".into(),
+                build: vec!["cargo".into(), "build".into(), "--quiet".into()],
+                run: vec!["target/debug/btest".into()],
+            },
+            compare: CompareSpec::default(),
+            normalize: vec![],
+            cases: vec![Case {
+                name: "prints_ok".into(),
+                provenance: Provenance::Manual,
+                args: vec![],
+                stdin: None,
+                env: Default::default(),
+                expect: Some(Expect {
+                    stdout: "OK".into(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                }),
+                nondeterministic: false,
+                compare: None,
+            }],
+        };
+
+        let work = tempfile::TempDir::new().unwrap();
+
+        // ---- Script the doctor turns. --------------------------------------
+        // The driver seeds with: CargoCheck (1) + RunBehaviorChecks (1).
+        // Scripted model turns:
+        //   1. run_behavior_checks  — see the mismatch
+        //   2. write_file           — fix src/main.rs to print "OK"
+        //   3. run_behavior_checks  — confirm it now matches
+        //   4. done
+        let fixed_main = "fn main() { print!(\"OK\"); }\n".to_string();
+        let turns = vec![
+            AssistantTurn::ToolInvocation {
+                name: "run_behavior_checks".to_string(),
+                arguments_json: "{}".to_string(),
+            },
+            AssistantTurn::ToolInvocation {
+                name: "write_file".to_string(),
+                arguments_json: format!(
+                    r#"{{"path":"src/main.rs","content":{}}}"#,
+                    serde_json::to_string(&fixed_main).unwrap()
+                ),
+            },
+            AssistantTurn::ToolInvocation {
+                name: "run_behavior_checks".to_string(),
+                arguments_json: "{}".to_string(),
+            },
+            AssistantTurn::ToolInvocation {
+                name: "done".to_string(),
+                arguments_json: r#"{"summary":"fixed behavioral mismatch"}"#.to_string(),
+            },
+        ];
+
+        let mut transport = ScriptedTransport::from(turns);
+        let budget = DoctorBudget {
+            max_tool_calls: 20,
+            max_wall_secs: 300,
+        };
+
+        let mut log: Vec<String> = Vec::new();
+        let _report = run_doctor(
+            &crate_dir,
+            &mut transport,
+            budget,
+            Some((spec.clone(), work.path().to_path_buf())),
+            &mut |msg| log.push(msg),
+        );
+
+        // ---- Assert the repair actually worked. ----------------------------
+        let result = crate::behavior::verify(&spec, &crate_dir, work.path())
+            .expect("verify should succeed after repair");
+        assert!(
+            result.total >= 1,
+            "expected at least 1 case in the spec, got {}",
+            result.total
+        );
+        assert_eq!(
+            result.matched, result.total,
+            "expected all {} cases to match after repair, got {} matched; log: {log:?}",
+            result.total, result.matched
+        );
     }
 }
