@@ -15,6 +15,9 @@ pub use harness::{build_side, expand, run_case};
 mod diff;
 pub use diff::{diff_case, normalize_text};
 
+mod mine;
+pub use mine::{help_case, mine_readme};
+
 /// A full behavioral-equivalence spec (`behavior.yaml`). Self-contained after
 /// golden capture: `cases[].expect` holds the source's captured output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
