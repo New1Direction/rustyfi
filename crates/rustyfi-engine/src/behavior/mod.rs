@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::BTreeMap;
+use std::path::Path;
 
 mod harness;
 pub use harness::{build_side, expand, run_case};
@@ -209,6 +210,35 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Build the source once, then capture golden output for every case by running
+/// the source binary. Each case is run TWICE: if the source disagrees with
+/// itself on any compared stream, the case is flagged `nondeterministic` and
+/// quarantined (its `expect` is left as the first run for visibility, but it is
+/// excluded from gating/repair by `verify`).
+pub fn capture_all(spec: &mut BehaviorSpec, root: &Path, work: &Path) -> Result<(), String> {
+    build_side(&spec.source, "source", root, work)?;
+    let default_compare = spec.compare;
+    let rules = spec.normalize.clone();
+
+    for case in &mut spec.cases {
+        let first = run_case(&spec.source, case, root, work);
+        let second = run_case(&spec.source, case, root, work);
+
+        let compare = case.compare.unwrap_or(default_compare);
+        let first_expect = Expect {
+            stdout: first.stdout.clone(),
+            stderr: first.stderr.clone(),
+            exit_code: first.exit_code,
+        };
+        // Compare the two source runs against each other using the same diff
+        // policy: any difference == nondeterministic.
+        let self_diffs = diff_case(&first_expect, &second, &compare, &rules);
+        case.nondeterministic = !self_diffs.is_empty();
+        case.expect = Some(first_expect);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +300,68 @@ cases:
         let yaml = serde_yaml::to_string(&original).expect("serialize");
         let recovered: Vec<Normalize> = serde_yaml::from_str(&yaml).expect("deserialize");
         assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn capture_fills_golden_and_flags_nondeterminism() {
+        use std::path::Path;
+        // Deterministic source: prints "D" for arg `det`. Nondeterministic
+        // source: prints the shell PID ($$), which differs each invocation.
+        let mut spec = BehaviorSpec {
+            name: "t".into(),
+            source: Side {
+                lang: "sh".into(),
+                dir: ".".into(),
+                build: vec![],
+                run: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "if [ \"$1\" = det ]; then printf D; else echo $$; fi".into(),
+                    "sh".into(),
+                ],
+            },
+            target: Side {
+                lang: "rust".into(),
+                dir: ".".into(),
+                build: vec![],
+                run: vec![],
+            },
+            compare: CompareSpec::default(),
+            normalize: vec![],
+            cases: vec![
+                Case {
+                    name: "det".into(),
+                    provenance: Provenance::Manual,
+                    args: vec!["det".into()],
+                    stdin: None,
+                    env: Default::default(),
+                    expect: None,
+                    nondeterministic: false,
+                    compare: None,
+                },
+                Case {
+                    name: "clock".into(),
+                    provenance: Provenance::Manual,
+                    args: vec!["clock".into()],
+                    stdin: None,
+                    env: Default::default(),
+                    expect: None,
+                    nondeterministic: false,
+                    compare: None,
+                },
+            ],
+        };
+        let root = std::env::current_dir().unwrap();
+        capture_all(&mut spec, &root, Path::new("/tmp")).unwrap();
+
+        let det = &spec.cases[0];
+        assert!(!det.nondeterministic);
+        assert_eq!(det.expect.as_ref().unwrap().stdout, "D");
+
+        let clock = &spec.cases[1];
+        assert!(
+            clock.nondeterministic,
+            "clock case should self-detect as nondeterministic"
+        );
     }
 }
