@@ -568,6 +568,46 @@ cases:
     }
 
     #[test]
+    #[ignore = "requires go + cargo toolchains; real end-to-end"]
+    fn calculator_real_behavior_e2e() {
+        use std::path::Path;
+        // CARGO_MANIFEST_DIR = crates/rustyfi-engine; ../.. = repo root.
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = source_side("go", "calculator").expect("go recipe");
+        let target = target_side("calculator");
+        let work = tempfile::tempdir().unwrap();
+        let out = generate_and_verify(
+            &repo.join("examples/calculator"),
+            &repo.join("bench/.work/out/calculator"),
+            "calculator",
+            source,
+            target,
+            true,
+            work.path(),
+        );
+        // Mining + golden capture from the Go source must always succeed.
+        assert!(
+            out.ran,
+            "should mine + capture from the Go source: {:?}",
+            out.skipped_reason
+        );
+        // If the committed generated Rust crate is present and builds, we get a
+        // report; its match count documents the real source↔target divergence.
+        if let Some(r) = out.report {
+            assert!(r.total >= 1, "at least one deterministic case");
+            eprintln!(
+                "E2E calculator: {}/{} matched, {} quarantined",
+                r.matched, r.total, r.quarantined
+            );
+        } else {
+            eprintln!(
+                "E2E calculator: target not verified ({:?})",
+                out.skipped_reason
+            );
+        }
+    }
+
+    #[test]
     fn verify_diffs_target_against_golden_and_skips_quarantined() {
         use std::path::Path;
         let spec = BehaviorSpec {
