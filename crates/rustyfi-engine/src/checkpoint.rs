@@ -243,6 +243,15 @@ pub struct VerificationCheckpoint {
     pub final_error_count: usize,
 }
 
+/// Outcome of the behavioral deep-fix repair pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehaviorRepair {
+    pub start_mismatches: usize,
+    pub end_mismatches: usize,
+    pub tool_calls: usize,
+    pub kept: bool,
+}
+
 /// Serializable output of the Behavior phase. `ran=false` means the phase was
 /// gated off or skipped (see `skipped_reason`); `verified=false` means golden
 /// was captured but the target was not run (it did not compile).
@@ -255,6 +264,9 @@ pub struct BehaviorCheckpoint {
     pub total: usize,
     pub quarantined: usize,
     pub skipped_reason: Option<String>,
+    /// Behavioral deep-fix outcome (None = repair not run).
+    #[serde(default)]
+    pub repair: Option<BehaviorRepair>,
 }
 
 /// Serializable output of the Packaging phase.
@@ -288,6 +300,7 @@ mod tests {
             total: 3,
             quarantined: 1,
             skipped_reason: None,
+            repair: None,
         };
         let json = serde_json::to_string(&cp).unwrap();
         let back: BehaviorCheckpoint = serde_json::from_str(&json).unwrap();

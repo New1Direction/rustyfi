@@ -161,6 +161,8 @@ pub struct BehaviorSummary {
     pub matched: usize,
     pub total: usize,
     pub quarantined: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<crate::checkpoint::BehaviorRepair>,
 }
 
 /// Output of a completed pipeline run.
@@ -356,6 +358,7 @@ where
                 &analysis_cp,
                 &scaffold_cp,
                 &verification_cp,
+                fix_llm.as_ref().unwrap_or(&llm),
                 &mut progress_cb,
             );
             store.write("behavior", &cp)?;
@@ -368,6 +371,7 @@ where
             matched: behavior_cp.matched,
             total: behavior_cp.total,
             quarantined: behavior_cp.quarantined,
+            repair: behavior_cp.repair.clone(),
         })
     } else {
         None
@@ -2038,11 +2042,84 @@ fn render_errors(
 // Phase 4.5: Behavioral equivalence
 // ---------------------------------------------------------------------------
 
+/// Keep the doctor's edits iff the crate still compiles AND behavioral
+/// mismatches strictly decreased.
+fn behavior_repair_accept(compiles: bool, start_mismatches: usize, end_mismatches: usize) -> bool {
+    compiles && end_mismatches < start_mismatches
+}
+
+fn behavior_repair<F: FnMut(Progress)>(
+    workspace: &Path,
+    spec: &crate::behavior::BehaviorSpec,
+    fix_llm: &crate::llm::LlmClient,
+    start_mismatches: usize,
+    progress_cb: &mut F,
+) -> crate::checkpoint::BehaviorRepair {
+    use crate::agent_fix::{run_doctor, DoctorBudget, LlmTransport};
+    use crate::checkpoint::BehaviorRepair;
+
+    let none = |tc: usize| BehaviorRepair {
+        start_mismatches,
+        end_mismatches: start_mismatches,
+        tool_calls: tc,
+        kept: false,
+    };
+
+    let budget = DoctorBudget {
+        max_tool_calls: std::env::var("RUSTYFI_DEEP_FIX_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40),
+        max_wall_secs: std::env::var("RUSTYFI_DEEP_FIX_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1200),
+    };
+    let snap = match snapshot_src(workspace) {
+        Ok(s) => s,
+        Err(_) => return none(0),
+    };
+    let work = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(_) => return none(0),
+    };
+
+    let mut transport = LlmTransport(fix_llm);
+    let report = run_doctor(
+        workspace,
+        &mut transport,
+        budget,
+        Some((spec.clone(), work.path().to_path_buf())),
+        &mut |m| emit(progress_cb, Progress::Note { message: m }),
+    );
+
+    let compiles = crate::behavior::build_target_ok(spec, workspace, work.path());
+    let end_mismatches = match crate::behavior::verify(spec, workspace, work.path()) {
+        Ok(r) => r.total - r.matched,
+        Err(_) => start_mismatches,
+    };
+    let kept = behavior_repair_accept(compiles, start_mismatches, end_mismatches);
+    if !kept {
+        let _ = restore_src(workspace, &snap);
+    }
+    BehaviorRepair {
+        start_mismatches,
+        end_mismatches: if kept {
+            end_mismatches
+        } else {
+            start_mismatches
+        },
+        tool_calls: report.tool_calls_used,
+        kept,
+    }
+}
+
 fn phase_behavior<F: FnMut(Progress)>(
     config: &RunConfig,
     analysis: &AnalysisCheckpoint,
     scaffold: &ScaffoldCheckpoint,
     verification: &VerificationCheckpoint,
+    fix_llm: &crate::llm::LlmClient,
     progress_cb: &mut F,
 ) -> crate::checkpoint::BehaviorCheckpoint {
     use crate::behavior::{generate_and_verify, source_side, target_side};
@@ -2056,6 +2133,7 @@ fn phase_behavior<F: FnMut(Progress)>(
         total: 0,
         quarantined: 0,
         skipped_reason: Some(reason.to_string()),
+        repair: None,
     };
 
     if !config.verify_behavior {
@@ -2130,10 +2208,79 @@ fn phase_behavior<F: FnMut(Progress)>(
         );
     }
 
-    let (matched, total, quarantined) = out
+    // Capture initial counts from the verify report; may be overwritten by repair.
+    let (mut matched, mut total, mut quarantined) = out
         .report
+        .as_ref()
         .map(|r| (r.matched, r.total, r.quarantined))
         .unwrap_or((0, 0, 0));
+
+    // ── Gated behavioral deep-fix pass ──────────────────────────────────────
+    // Fires only when: verified, RUSTYFI_DEEP_FIX is set, and there are mismatches.
+    let mut repair: Option<crate::checkpoint::BehaviorRepair> = None;
+    if out.verified
+        && std::env::var("RUSTYFI_DEEP_FIX").is_ok()
+        && out
+            .report
+            .as_ref()
+            .map(|r| r.matched < r.total)
+            .unwrap_or(false)
+    {
+        if let Some(spec) = &out.spec {
+            let report = out.report.as_ref().unwrap();
+            let start_mismatches = report.total - report.matched;
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: format!(
+                        "Behavior: {start_mismatches} mismatch(es) — engaging the deep-fix doctor…"
+                    ),
+                },
+            );
+            let info = behavior_repair(
+                &scaffold.workspace_path,
+                spec,
+                fix_llm,
+                start_mismatches,
+                progress_cb,
+            );
+            // Refresh behavior_report.json + counts from the (kept or reverted) state.
+            if let Ok(work2) = tempfile::tempdir() {
+                if let Ok(fresh) =
+                    crate::behavior::verify(spec, &scaffold.workspace_path, work2.path())
+                {
+                    if let Ok(json) = serde_json::to_string_pretty(&fresh) {
+                        let _ = std::fs::write(
+                            scaffold.workspace_path.join("behavior_report.json"),
+                            json,
+                        );
+                    }
+                    // Overwrite counts with the fresh values.
+                    matched = fresh.matched;
+                    total = fresh.total;
+                    quarantined = fresh.quarantined;
+                }
+            }
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: if info.kept {
+                        format!(
+                            "Behavior: deep-fix improved mismatches {}→{} ({} tool calls).",
+                            info.start_mismatches, info.end_mismatches, info.tool_calls
+                        )
+                    } else {
+                        format!(
+                            "Behavior: deep-fix did not improve behavior — reverted ({} tool calls).",
+                            info.tool_calls
+                        )
+                    },
+                },
+            );
+            repair = Some(info);
+        }
+    }
+
     BehaviorCheckpoint {
         ran: out.ran,
         verified: out.verified,
@@ -2142,6 +2289,7 @@ fn phase_behavior<F: FnMut(Progress)>(
         total,
         quarantined,
         skipped_reason: out.skipped_reason,
+        repair,
     }
 }
 
@@ -2988,6 +3136,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn behavior_repair_accepts_only_strict_improvement_that_compiles() {
+        assert!(behavior_repair_accept(true, 3, 1));
+        assert!(!behavior_repair_accept(true, 3, 3));
+        assert!(!behavior_repair_accept(false, 3, 0));
+        assert!(!behavior_repair_accept(true, 0, 0));
+    }
+
+    #[test]
     fn version_sanitiser_strips_trailing_junk() {
         // The exact garbage that broke the THC Hydra run's Cargo.toml.
         assert_eq!(
@@ -3290,6 +3446,7 @@ rstest = "0.18"
             total: 4,
             quarantined: 1,
             skipped_reason: None,
+            repair: None,
         };
         let md = behavior_section(Some(&cp));
         assert!(md.contains("Behavior"));
@@ -3308,6 +3465,7 @@ rstest = "0.18"
             total: 0,
             quarantined: 0,
             skipped_reason: Some("behavior verification not enabled".into()),
+            repair: None,
         };
         assert!(behavior_section(Some(&gated)).is_empty());
     }

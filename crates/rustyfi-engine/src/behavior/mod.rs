@@ -220,6 +220,11 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// True if the target side builds (cheap compile gate for repair acceptance).
+pub fn build_target_ok(spec: &BehaviorSpec, workspace: &Path, work: &Path) -> bool {
+    build_side(&spec.target, "target", workspace, work).is_ok()
+}
+
 /// Build the source once, then capture golden output for every case by running
 /// the source binary. Each case is run TWICE: if the source disagrees with
 /// itself on any compared stream, the case is flagged `nondeterministic` and
@@ -284,6 +289,8 @@ pub struct BehaviorOutcome {
     pub report: Option<BehaviorReport>,
     pub spec_yaml: Option<String>,
     pub skipped_reason: Option<String>,
+    /// The captured spec (golden filled), present when `ran = true`.
+    pub spec: Option<BehaviorSpec>,
 }
 
 /// Mine a corpus from the source README, capture golden from the source, and
@@ -327,6 +334,7 @@ pub fn generate_and_verify(
             report: None,
             spec_yaml: None,
             skipped_reason: Some(format!("could not run source: {e}")),
+            spec: None,
         };
     }
     let spec_yaml = serde_yaml::to_string(&spec).ok();
@@ -339,8 +347,10 @@ pub fn generate_and_verify(
             report: None,
             spec_yaml,
             skipped_reason: Some("target did not compile — behavior unverified".into()),
+            spec: Some(spec),
         };
     }
+    // `verify` borrows `spec`; move spec into the outcome after the call.
     match verify(&spec, workspace, work) {
         Ok(report) => BehaviorOutcome {
             ran: true,
@@ -349,6 +359,7 @@ pub fn generate_and_verify(
             report: Some(report),
             spec_yaml,
             skipped_reason: None,
+            spec: Some(spec),
         },
         Err(e) => BehaviorOutcome {
             ran: true,
@@ -357,6 +368,7 @@ pub fn generate_and_verify(
             report: None,
             spec_yaml,
             skipped_reason: Some(format!("target build/run failed: {e}")),
+            spec: Some(spec),
         },
     }
 }

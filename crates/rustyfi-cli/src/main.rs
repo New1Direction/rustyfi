@@ -626,6 +626,7 @@ mod tests {
                 matched: 2,
                 total: 3,
                 quarantined: 1,
+                repair: None,
             }),
         };
         let v = build_json_summary(
