@@ -372,6 +372,12 @@ fn behavior_to_json(b: &BehaviorSummary) -> serde_json::Value {
         "matched": b.matched,
         "total": b.total,
         "quarantined": b.quarantined,
+        "repair": b.repair.as_ref().map(|r| serde_json::json!({
+            "start_mismatches": r.start_mismatches,
+            "end_mismatches": r.end_mismatches,
+            "tool_calls": r.tool_calls,
+            "kept": r.kept,
+        })).unwrap_or(serde_json::Value::Null),
     })
 }
 
@@ -642,5 +648,48 @@ mod tests {
         assert_eq!(v["behavior"]["ran"], true);
         assert_eq!(v["behavior"]["total"], 3);
         assert_eq!(v["behavior"]["quarantined"], 1);
+        // repair absent → null
+        assert_eq!(v["behavior"]["repair"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn json_summary_behavior_repair_fields_when_present() {
+        use rustyfi_engine::checkpoint::BehaviorRepair;
+        let r = RunResult {
+            zip: vec![],
+            crate_name: "demo".into(),
+            language: "python".into(),
+            files_failed: 0,
+            cargo_clean: true,
+            error_count: 0,
+            todo_count: 0,
+            files_translated: 3,
+            deep_fix: None,
+            behavior: Some(BehaviorSummary {
+                ran: true,
+                verified: true,
+                matched: 2,
+                total: 3,
+                quarantined: 0,
+                repair: Some(BehaviorRepair {
+                    start_mismatches: 3,
+                    end_mismatches: 1,
+                    tool_calls: 12,
+                    kept: true,
+                }),
+            }),
+        };
+        let v = build_json_summary(
+            &r,
+            Path::new("/out/demo-rust"),
+            3,
+            10.0,
+            "deepseek-chat",
+            "deepseek-chat",
+        );
+        assert_eq!(v["behavior"]["repair"]["start_mismatches"], 3);
+        assert_eq!(v["behavior"]["repair"]["end_mismatches"], 1);
+        assert_eq!(v["behavior"]["repair"]["tool_calls"], 12);
+        assert_eq!(v["behavior"]["repair"]["kept"], true);
     }
 }

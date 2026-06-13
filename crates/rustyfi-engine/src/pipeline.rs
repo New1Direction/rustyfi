@@ -2465,6 +2465,19 @@ fn behavior_section(cp: Option<&crate::checkpoint::BehaviorCheckpoint>) -> Strin
             "Behavioral spec mined to `behavior.yaml` but not verified ({reason}).\n"
         ));
     }
+    if let Some(r) = &cp.repair {
+        if r.kept {
+            s.push_str(&format!(
+                "\nDeep-fix improved behavior: {}→{} mismatches ({} tool calls).\n",
+                r.start_mismatches, r.end_mismatches, r.tool_calls
+            ));
+        } else {
+            s.push_str(&format!(
+                "\nDeep-fix attempted but did not improve behavior; reverted ({} tool calls).\n",
+                r.tool_calls
+            ));
+        }
+    }
     s.push_str(
         "\nExtend `behavior.yaml` with more cases and re-run `rustyfi verify-behavior .`.\n",
     );
@@ -3468,5 +3481,57 @@ rstest = "0.18"
             repair: None,
         };
         assert!(behavior_section(Some(&gated)).is_empty());
+    }
+
+    #[test]
+    fn next_steps_behavior_section_includes_repair_summary_when_kept() {
+        use crate::checkpoint::BehaviorRepair;
+        let cp = crate::checkpoint::BehaviorCheckpoint {
+            ran: true,
+            verified: true,
+            mined: 5,
+            matched: 1,
+            total: 5,
+            quarantined: 0,
+            skipped_reason: None,
+            repair: Some(BehaviorRepair {
+                start_mismatches: 4,
+                end_mismatches: 1,
+                tool_calls: 9,
+                kept: true,
+            }),
+        };
+        let md = behavior_section(Some(&cp));
+        assert!(md.contains("4→1"), "expected '4→1' in:\n{md}");
+        assert!(
+            md.contains("9 tool calls"),
+            "expected '9 tool calls' in:\n{md}"
+        );
+    }
+
+    #[test]
+    fn next_steps_behavior_section_includes_reverted_message_when_not_kept() {
+        use crate::checkpoint::BehaviorRepair;
+        let cp = crate::checkpoint::BehaviorCheckpoint {
+            ran: true,
+            verified: true,
+            mined: 3,
+            matched: 2,
+            total: 3,
+            quarantined: 0,
+            skipped_reason: None,
+            repair: Some(BehaviorRepair {
+                start_mismatches: 2,
+                end_mismatches: 2,
+                tool_calls: 5,
+                kept: false,
+            }),
+        };
+        let md = behavior_section(Some(&cp));
+        assert!(md.contains("reverted"), "expected 'reverted' in:\n{md}");
+        assert!(
+            md.contains("5 tool calls"),
+            "expected '5 tool calls' in:\n{md}"
+        );
     }
 }
