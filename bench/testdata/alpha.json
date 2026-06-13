@@ -1,1 +1,1 @@
-{"crate_name":"alpha","language":"go","files_total":5,"files_translated":5,"files_failed":0,"errors":0,"todos":0,"cargo_clean":true,"duration_secs":60.0,"translate_model":"m","fix_model":"m","exit_code":0}
+{"crate_name":"alpha","language":"go","files_total":5,"files_translated":5,"files_failed":0,"errors":0,"todos":0,"cargo_clean":true,"duration_secs":60.0,"translate_model":"m","fix_model":"m","exit_code":0,"behavior":{"ran":true,"verified":true,"matched":2,"total":2,"quarantined":0}}

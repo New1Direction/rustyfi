@@ -58,21 +58,32 @@ def render(rows: list[dict]) -> str:
     out.append(f"**Clean rate (achievable):** {done}/{total} ({pct}) · "
                f"**median errors:** {h['median_errors']} · "
                f"**prompt-cache:** {h['prompt_cache_errors']} errors")
-    out += ["", "| repo | lang | expectation | verdict | errors | todos | files | secs |",
-            "|---|---|---|---|---|---|---|---|"]
+    out += ["", "| repo | lang | expectation | verdict | errors | todos | files | secs | behavior |",
+            "|---|---|---|---|---|---|---|---|---|"]
     for r in rows:
         m, res = r["meta"], r["result"]
         if res is None:
             verdict, errs, todos, files, secs = "⚪ not run", "—", "—", "—", "—"
+            behavior = "—"
         elif res.get("pipeline_failed"):
             verdict, errs, todos, files, secs = "🔴 pipeline failed", "—", "—", "—", "—"
+            behavior = "—"
         else:
             verdict = VERDICT[bool(res["cargo_clean"])]
             errs, todos = res["errors"], res["todos"]
             files = f"{res['files_translated']}/{res['files_total']}"
             secs = f"{res['duration_secs']:.0f}"
+            b = res.get("behavior")
+            if b and b.get("verified"):
+                behavior = f"{b['matched']}/{b['total']}"
+            elif b and b.get("ran"):
+                behavior = "unverified"
+            elif m.get("behavior_verifiable"):
+                behavior = "n/a"
+            else:
+                behavior = "—"
         out.append(f"| {m['name']} | {m['language']} | {m['expectation']} "
-                   f"| {verdict} | {errs} | {todos} | {files} | {secs} |")
+                   f"| {verdict} | {errs} | {todos} | {files} | {secs} | {behavior} |")
     out += ["", "_impossible repos are shown but excluded from the clean-rate denominator._", ""]
     return "\n".join(out)
 
@@ -88,6 +99,7 @@ def self_test() -> None:
     assert "1/3 (33%)" in md, md
     assert "🟢 clean" in md and "🟠 partial" in md, md
     assert "🔴 pipeline failed" in md, md
+    assert "2/2" in md, md
     print("self-test: OK")
 
 

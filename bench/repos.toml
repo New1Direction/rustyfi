@@ -10,6 +10,7 @@ pinned_commit = "local"
 language = "go"
 size_tier = "small"
 expectation = "clean"
+behavior_verifiable = true
 
 [[repo]]
 name = "prompt-cache"
@@ -18,6 +19,7 @@ pinned_commit = "1898127820a2366a224f0c293594c9cf20db760e"
 language = "go"
 size_tier = "medium"
 expectation = "clean"
+behavior_verifiable = true
 
 [[repo]]
 name = "cobra"
