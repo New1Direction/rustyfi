@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 mod harness;
 pub use harness::{build_side, expand, run_case};
 
+mod diff;
+pub use diff::{diff_case, normalize_text};
+
 /// A full behavioral-equivalence spec (`behavior.yaml`). Self-contained after
 /// golden capture: `cases[].expect` holds the source's captured output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
