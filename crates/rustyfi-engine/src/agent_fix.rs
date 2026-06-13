@@ -48,6 +48,8 @@ pub enum ToolCall {
     Search { symbol: String },
     /// Run `cargo check` and return the first 8 000 bytes of error diagnostics.
     CargoCheck,
+    /// Build + run the target against the behavioral corpus; report per-case diffs.
+    RunBehaviorChecks,
     /// Return a cached `rustc --explain` excerpt for an error code.
     Explain { code: String },
     /// Write a file confined to `<ws>/src`; rebuilds the item index afterwards.
@@ -76,6 +78,8 @@ pub struct DoctorSession {
     calls_used: usize,
     started: Instant,
     item_index: ItemIndex,
+    /// Optional behavioral corpus + scratch dir; enables the RunBehaviorChecks tool.
+    behavior: Option<(crate::behavior::BehaviorSpec, std::path::PathBuf)>,
     /// Error count from the most recent CargoCheck call (–1 = never run).
     last_error_count: i64,
 }
@@ -90,6 +94,7 @@ impl DoctorSession {
             calls_used: 0,
             started: Instant::now(),
             item_index,
+            behavior: None,
             last_error_count: -1,
         }
     }
@@ -101,6 +106,22 @@ impl DoctorSession {
     /// in error paths before continuing the loop.
     pub(crate) fn count_invalid_call(&mut self) {
         self.calls_used += 1;
+    }
+
+    /// Attach a behavioral corpus so the session can run `RunBehaviorChecks`.
+    pub fn with_behavior(
+        mut self,
+        spec: crate::behavior::BehaviorSpec,
+        work: std::path::PathBuf,
+    ) -> Self {
+        self.behavior = Some((spec, work));
+        self
+    }
+
+    /// True when a behavioral corpus is attached.
+    #[allow(dead_code)] // used by run_doctor in Task 2
+    pub fn has_behavior(&self) -> bool {
+        self.behavior.is_some()
     }
 
     /// Execute one tool call.  Always increments `calls_used` first; returns a
@@ -127,6 +148,7 @@ impl DoctorSession {
             ToolCall::ReadFile { path } => self.read_file(&path),
             ToolCall::Search { symbol } => self.search(&symbol),
             ToolCall::CargoCheck => self.cargo_check(),
+            ToolCall::RunBehaviorChecks => self.run_behavior_checks(),
             ToolCall::Explain { code } => self.explain(&code),
             ToolCall::WriteFile { path, content } => self.write_file(&path, &content),
         }
@@ -297,6 +319,38 @@ impl DoctorSession {
         ToolOutcome {
             payload,
             is_terminal: false,
+        }
+    }
+
+    /// Build + run the target against the corpus and render per-case diffs.
+    fn run_behavior_checks(&mut self) -> ToolOutcome {
+        let Some((spec, work)) = &self.behavior else {
+            return ToolOutcome {
+                payload: "no behavioral corpus loaded for this session".to_string(),
+                is_terminal: false,
+            };
+        };
+        match crate::behavior::verify(spec, &self.workspace, work) {
+            Ok(report) => {
+                let mut p = format!(
+                    "behavior: {}/{} cases matched ({} quarantined)\n",
+                    report.matched, report.total, report.quarantined
+                );
+                for c in report.cases.iter().filter(|c| !c.matched) {
+                    p.push_str(&format!("MISMATCH {}:\n", c.name));
+                    for d in &c.diffs {
+                        p.push_str(&format!("  {d}\n"));
+                    }
+                }
+                ToolOutcome {
+                    payload: tail_truncate(p, 8_000),
+                    is_terminal: false,
+                }
+            }
+            Err(e) => ToolOutcome {
+                payload: format!("behavior check failed to run: {e}"),
+                is_terminal: false,
+            },
         }
     }
 
@@ -488,6 +542,7 @@ pub fn parse_action_reply(reply: &str) -> Result<ToolCall, String> {
     match tool {
         "list_files" => Ok(ToolCall::ListFiles),
         "cargo_check" => Ok(ToolCall::CargoCheck),
+        "run_behavior_checks" => Ok(ToolCall::RunBehaviorChecks),
         "read_file" => {
             let path = args["path"]
                 .as_str()
@@ -783,6 +838,7 @@ fn tool_call_from_native(name: &str, arguments_json: &str) -> Result<ToolCall, S
     match name {
         "list_files" => Ok(ToolCall::ListFiles),
         "cargo_check" => Ok(ToolCall::CargoCheck),
+        "run_behavior_checks" => Ok(ToolCall::RunBehaviorChecks),
         "read_file" => {
             let path = args["path"]
                 .as_str()
@@ -984,6 +1040,7 @@ pub fn run_doctor(
                             ToolCall::ReadFile { .. } => "read_file",
                             ToolCall::Search { .. } => "search",
                             ToolCall::CargoCheck => "cargo_check",
+                            ToolCall::RunBehaviorChecks => "run_behavior_checks",
                             ToolCall::Explain { .. } => "explain",
                             ToolCall::WriteFile { .. } => "write_file",
                             ToolCall::Done { .. } => "done",
@@ -1863,5 +1920,74 @@ mod tests {
                 .any(|m| m.contains("list_files") && m.contains("json-fallback")),
             "expected a log entry for list_files via json-fallback; log: {log:?}"
         );
+    }
+
+    // ── T14: RunBehaviorChecks tool ──────────────────────────────────────────
+
+    #[test]
+    fn run_behavior_checks_reports_mismatch() {
+        use crate::behavior::{BehaviorSpec, Case, CompareSpec, Expect, Provenance, Side};
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = BehaviorSpec {
+            name: "t".into(),
+            source: Side {
+                lang: "sh".into(),
+                dir: ".".into(),
+                build: vec![],
+                run: vec![],
+            },
+            target: Side {
+                lang: "sh".into(),
+                dir: ".".into(),
+                build: vec![],
+                run: vec!["sh".into(), "-c".into(), "printf WRONG".into(), "sh".into()],
+            },
+            compare: CompareSpec::default(),
+            normalize: vec![],
+            cases: vec![Case {
+                name: "c".into(),
+                provenance: Provenance::Manual,
+                args: vec![],
+                stdin: None,
+                env: Default::default(),
+                expect: Some(Expect {
+                    stdout: "OK".into(),
+                    stderr: String::new(),
+                    exit_code: 0,
+                }),
+                nondeterministic: false,
+                compare: None,
+            }],
+        };
+        let work = tempfile::tempdir().unwrap();
+        let mut session = DoctorSession::new(tmp.path(), DoctorBudget::default())
+            .with_behavior(spec, work.path().to_path_buf());
+        let out = session.execute(ToolCall::RunBehaviorChecks);
+        assert!(!out.is_terminal);
+        assert!(out.payload.contains("c"));
+        assert!(
+            out.payload.to_lowercase().contains("mismatch") || out.payload.contains("0/1"),
+            "expected mismatch indicator in: {}",
+            out.payload
+        );
+    }
+
+    #[test]
+    fn run_behavior_checks_without_corpus_is_a_noop_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut session = DoctorSession::new(tmp.path(), DoctorBudget::default());
+        let out = session.execute(ToolCall::RunBehaviorChecks);
+        assert!(!out.is_terminal);
+        assert!(
+            out.payload.contains("no behavioral corpus"),
+            "expected 'no behavioral corpus' in: {}",
+            out.payload
+        );
+    }
+
+    #[test]
+    fn parses_run_behavior_checks_action() {
+        let t = parse_action_reply(r#"{"tool":"run_behavior_checks","args":{}}"#).unwrap();
+        assert!(matches!(t, ToolCall::RunBehaviorChecks));
     }
 }
