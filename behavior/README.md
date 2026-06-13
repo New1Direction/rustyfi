@@ -57,11 +57,32 @@ cases:
 (`behavior/.work/`). Paths are relative to the repo root; commands run with
 `cwd=dir`.
 
-## Status & where this is going
+## Status
 
-This is a **standalone proof** — pure mechanism, no model, $0 to run. It
-deliberately does **not** prejudge the production architecture. The full
-behavioral-repair phase (a `phase_behavior_verify` pipeline stage, a
-`RunBehaviorChecks` tool inside the existing `agent_fix.rs` doctor loop, the
-contract format, a multi-case corpus, and determinism handling) is the subject
-of a dedicated design spec before any of it is built.
+This `check.py` is the original **standalone proof** — pure mechanism, no model,
+$0 to run. The production version now lives in Rust (`rustyfi-engine`'s
+`behavior` module) and is wired into the tool end to end:
+
+- **Detection + mining** (Plan 1 + 2): a translation run with the source
+  toolchain present auto-mines a corpus from the README/`--help`, captures golden
+  output from the source (quarantining nondeterministic cases), and — once the
+  crate compiles — diffs the Rust target against it, writing `behavior.yaml` +
+  `behavior_report.json` into the crate. Re-run anytime with
+  `rustyfi verify-behavior <crate-dir>`.
+- **Repair** (Plan 3): under `--deep`, a `RunBehaviorChecks` tool in the
+  `agent_fix.rs` doctor loop grinds behavioral mismatches down, keeping the
+  doctor's edits only if the crate still compiles **and** mismatches strictly
+  decrease (snapshot-revert otherwise).
+
+Design: `docs/superpowers/specs/2026-06-12-behavioral-equivalence-design.md`.
+Plans: `docs/superpowers/plans/2026-06-13-behavior-*.md`.
+
+**Security boundary:** behavioral verification builds and runs the source
+project, so it is **CLI/local + bench only**. The hosted server never executes
+uploaded code (`verify_behavior` stays off there).
+
+**Only open item:** the *live* repair gate — driving the doctor's behavioral
+loop against a real divergence needs a Claude-class fix model behind
+`RUSTYFI_FIX_MODEL` (the same key as the phase-3 headline run). Every
+deterministic seam is proven by a scripted e2e; the live convergence run is
+pending that model.
