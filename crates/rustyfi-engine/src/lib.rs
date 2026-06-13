@@ -1,5 +1,6 @@
 pub mod agent_fix;
 pub mod analysis;
+pub mod behavior;
 pub mod checkpoint;
 pub mod chunker;
 pub mod contract_check;
