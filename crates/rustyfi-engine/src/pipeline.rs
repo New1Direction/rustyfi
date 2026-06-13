@@ -55,6 +55,11 @@ pub struct RunConfig {
     pub tier_fast_tokens: usize,
     /// Token threshold below which the mid model tier is used (default: 3000).
     pub tier_mid_tokens: usize,
+    /// When true, run the behavioral-equivalence phase (mine + capture golden
+    /// from the source + verify the target). Requires the SOURCE toolchain and
+    /// executes the source project, so callers enable it only where that is
+    /// trusted (CLI/local). The server leaves it false (no executing uploads).
+    pub verify_behavior: bool,
 }
 
 impl Default for RunConfig {
@@ -69,6 +74,7 @@ impl Default for RunConfig {
             parallel: 16,
             tier_fast_tokens: 400,
             tier_mid_tokens: 3_000,
+            verify_behavior: false,
         }
     }
 }

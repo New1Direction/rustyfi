@@ -22,6 +22,10 @@ pub(crate) use diff::diff_case;
 mod mine;
 pub use mine::{help_case, mine_readme};
 
+mod recipe;
+#[allow(unused_imports)] // used by phase_behavior wired in a later task
+pub(crate) use recipe::{source_side, target_side};
+
 /// A full behavioral-equivalence spec (`behavior.yaml`). Self-contained after
 /// golden capture: `cases[].expect` holds the source's captured output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
