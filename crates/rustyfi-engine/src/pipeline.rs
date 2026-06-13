@@ -153,8 +153,6 @@ pub struct DeepFixSummary {
 /// Summary of the behavioral-equivalence phase (populated when `verify_behavior`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-// populated in Task 3 / read by the CLI in Task 5
-#[allow(dead_code)]
 pub struct BehaviorSummary {
     /// The phase ran (mined + captured). False when gated off / skipped.
     pub ran: bool,
@@ -348,6 +346,33 @@ where
             (cp, df)
         };
 
+    // ── Phase 5: Behavioral equivalence (gated on verify_behavior) ────────
+    let behavior_cp =
+        if let Some(cp) = store.read::<crate::checkpoint::BehaviorCheckpoint>("behavior") {
+            cp
+        } else {
+            let cp = phase_behavior(
+                &config,
+                &analysis_cp,
+                &scaffold_cp,
+                &verification_cp,
+                &mut progress_cb,
+            );
+            store.write("behavior", &cp)?;
+            cp
+        };
+    let behavior = if behavior_cp.ran {
+        Some(BehaviorSummary {
+            ran: behavior_cp.ran,
+            verified: behavior_cp.verified,
+            matched: behavior_cp.matched,
+            total: behavior_cp.total,
+            quarantined: behavior_cp.quarantined,
+        })
+    } else {
+        None
+    };
+
     // ── Completion report ─────────────────────────────────────────────────
     // Tell the user exactly what's left to make the crate compile — system
     // libraries to install, inferred deps to verify, stubs and todo!() gaps.
@@ -465,7 +490,7 @@ where
         todo_count: report.todo_count,
         files_translated: report.translated,
         deep_fix,
-        behavior: None, // populated in Task 3
+        behavior,
     })
 }
 
@@ -2004,6 +2029,117 @@ fn render_errors(
         output.stderr_lines.join("\n")
     } else {
         rendered.join("\n")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 4.5: Behavioral equivalence
+// ---------------------------------------------------------------------------
+
+fn phase_behavior<F: FnMut(Progress)>(
+    config: &RunConfig,
+    analysis: &AnalysisCheckpoint,
+    scaffold: &ScaffoldCheckpoint,
+    verification: &VerificationCheckpoint,
+    progress_cb: &mut F,
+) -> crate::checkpoint::BehaviorCheckpoint {
+    use crate::behavior::{generate_and_verify, source_side, target_side};
+    use crate::checkpoint::BehaviorCheckpoint;
+
+    let skip = |reason: &str| BehaviorCheckpoint {
+        ran: false,
+        verified: false,
+        mined: 0,
+        matched: 0,
+        total: 0,
+        quarantined: 0,
+        skipped_reason: Some(reason.to_string()),
+    };
+
+    if !config.verify_behavior {
+        return skip("behavior verification not enabled");
+    }
+    let source = match source_side(&analysis.language, &scaffold.crate_name) {
+        Some(s) => s,
+        None => {
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: format!(
+                        "Behavior: source language `{}` not yet supported — skipping.",
+                        analysis.language
+                    ),
+                },
+            );
+            return skip(&format!(
+                "unsupported source language: {}",
+                analysis.language
+            ));
+        }
+    };
+    let target = target_side(&scaffold.crate_name);
+
+    emit(
+        progress_cb,
+        Progress::Note {
+            message: "Behavior: mining cases + capturing golden output from the source…".into(),
+        },
+    );
+
+    // Build scratch lives OUTSIDE the crate tree (auto-cleaned), so source/target
+    // binaries never leak into the packaged ZIP.
+    let work = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => return skip(&format!("could not create behavior work dir: {e}")),
+    };
+
+    let out = generate_and_verify(
+        &analysis.source_dir,
+        &scaffold.workspace_path,
+        &scaffold.crate_name,
+        source,
+        target,
+        verification.exit_clean,
+        work.path(),
+    );
+
+    if let Some(yaml) = &out.spec_yaml {
+        let _ = std::fs::write(scaffold.workspace_path.join("behavior.yaml"), yaml);
+    }
+    if let Some(report) = &out.report {
+        if let Ok(json) = serde_json::to_string_pretty(report) {
+            let _ = std::fs::write(scaffold.workspace_path.join("behavior_report.json"), json);
+        }
+        emit(
+            progress_cb,
+            Progress::Note {
+                message: format!(
+                    "Behavior: {}/{} cases matched the original ({} quarantined as nondeterministic).",
+                    report.matched, report.total, report.quarantined
+                ),
+            },
+        );
+    } else if let Some(reason) = &out.skipped_reason {
+        emit(
+            progress_cb,
+            Progress::Note {
+                message: format!("Behavior: {reason}"),
+            },
+        );
+    }
+
+    let (matched, total, quarantined) = out
+        .report
+        .map(|r| (r.matched, r.total, r.quarantined))
+        .unwrap_or((0, 0, 0));
+    BehaviorCheckpoint {
+        ran: out.ran,
+        verified: out.verified,
+        mined: out.mined,
+        matched,
+        total,
+        quarantined,
+        skipped_reason: out.skipped_reason,
     }
 }
 

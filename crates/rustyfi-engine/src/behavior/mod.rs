@@ -23,7 +23,6 @@ mod mine;
 pub use mine::{help_case, mine_readme};
 
 mod recipe;
-#[allow(unused_imports)] // used by phase_behavior wired in a later task
 pub(crate) use recipe::{source_side, target_side};
 
 /// A full behavioral-equivalence spec (`behavior.yaml`). Self-contained after
@@ -276,6 +275,92 @@ pub struct BehaviorReport {
     pub cases: Vec<CaseResult>,
 }
 
+/// Outcome of the behavioral phase orchestration.
+#[must_use]
+pub struct BehaviorOutcome {
+    pub ran: bool,
+    pub verified: bool,
+    pub mined: usize,
+    pub report: Option<BehaviorReport>,
+    pub spec_yaml: Option<String>,
+    pub skipped_reason: Option<String>,
+}
+
+/// Mine a corpus from the source README, capture golden from the source, and
+/// (if `verify_target`) build + verify the target. Writes nothing to disk — the
+/// caller persists `spec_yaml` / the report. Fail-open: a capture/build error
+/// is returned as `skipped_reason`, never panics.
+// Seven small, distinct args (paths, names, sides, a flag) — clearer at the
+// single call site than a one-off config struct.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_and_verify(
+    source_dir: &Path,
+    workspace: &Path,
+    bin_name: &str,
+    source: Side,
+    target: Side,
+    verify_target: bool,
+    work: &Path,
+) -> BehaviorOutcome {
+    let readme = ["README.md", "readme.md", "README"]
+        .iter()
+        .find_map(|f| std::fs::read_to_string(source_dir.join(f)).ok())
+        .unwrap_or_default();
+    let mut cases = mine_readme(&readme, bin_name);
+    cases.push(help_case());
+    let mined = cases.len();
+
+    let mut spec = BehaviorSpec {
+        name: bin_name.to_string(),
+        source,
+        target,
+        compare: CompareSpec::default(),
+        normalize: vec![],
+        cases,
+    };
+
+    if let Err(e) = capture_all(&mut spec, source_dir, work) {
+        return BehaviorOutcome {
+            ran: false,
+            verified: false,
+            mined,
+            report: None,
+            spec_yaml: None,
+            skipped_reason: Some(format!("could not run source: {e}")),
+        };
+    }
+    let spec_yaml = serde_yaml::to_string(&spec).ok();
+
+    if !verify_target {
+        return BehaviorOutcome {
+            ran: true,
+            verified: false,
+            mined,
+            report: None,
+            spec_yaml,
+            skipped_reason: Some("target did not compile — behavior unverified".into()),
+        };
+    }
+    match verify(&spec, workspace, work) {
+        Ok(report) => BehaviorOutcome {
+            ran: true,
+            verified: true,
+            mined,
+            report: Some(report),
+            spec_yaml,
+            skipped_reason: None,
+        },
+        Err(e) => BehaviorOutcome {
+            ran: true,
+            verified: false,
+            mined,
+            report: None,
+            spec_yaml,
+            skipped_reason: Some(format!("target build/run failed: {e}")),
+        },
+    }
+}
+
 /// Build the target, run every NON-quarantined case, and diff against golden.
 /// Quarantined cases are counted in `quarantined` but excluded from
 /// `total`/`matched`/`passed`. A case with no captured `expect` is skipped with
@@ -448,6 +533,38 @@ cases:
             clock.nondeterministic,
             "clock case should self-detect as nondeterministic"
         );
+    }
+
+    #[test]
+    fn generate_and_verify_end_to_end_with_sh_recipe() {
+        use std::path::Path;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "```\n$ tool ping\n```\n").unwrap();
+        let source = Side {
+            lang: "sh".into(),
+            dir: ".".into(),
+            build: vec![],
+            run: vec!["sh".into(), "-c".into(), "printf pong".into(), "sh".into()],
+        };
+        let target = Side {
+            lang: "sh".into(),
+            dir: ".".into(),
+            build: vec![],
+            run: vec!["sh".into(), "-c".into(), "printf pong".into(), "sh".into()],
+        };
+        let out = generate_and_verify(
+            dir.path(),
+            dir.path(),
+            "tool",
+            source,
+            target,
+            true,
+            Path::new("/tmp"),
+        );
+        assert!(out.ran);
+        assert!(out.verified);
+        assert!(out.report.is_some());
+        assert!(out.report.unwrap().total >= 1);
     }
 
     #[test]

@@ -7,7 +7,6 @@ use super::Side;
 
 /// Build the `Side` for the Rust target crate. Always `cargo build` + the debug
 /// binary (the pipeline only ran `cargo check`, so the binary must be built).
-#[allow(dead_code)] // wired into phase_behavior in a later task
 pub(crate) fn target_side(crate_name: &str) -> Side {
     Side {
         lang: "rust".to_string(),
@@ -20,7 +19,6 @@ pub(crate) fn target_side(crate_name: &str) -> Side {
 /// Build the `Side` for the source project, keyed on the detected language.
 /// `bin_name` is the basename used for the built source binary. Returns `None`
 /// for languages we cannot yet build/run, so the caller skips behavior.
-#[allow(dead_code)] // wired into phase_behavior in a later task
 pub(crate) fn source_side(language: &str, bin_name: &str) -> Option<Side> {
     let side = match language {
         "go" => Side {
