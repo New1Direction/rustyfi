@@ -90,6 +90,12 @@ rustyfi ./myapp -o ./myapp-rust
 
 # stuck on the last few errors of a complex app? engage the agentic doctor:
 rustyfi ./myapp -o ./myapp-rust --deep   # needs a strong RUSTYFI_FIX_MODEL
+
+# skip behavioral verification (e.g. source toolchain not present):
+rustyfi ./myapp -o ./myapp-rust --no-behavior
+
+# re-run behavioral checks against an already-built crate (edit/extend behavior.yaml, then):
+rustyfi verify-behavior ./myapp-rust
 ```
 
 ```text
@@ -163,10 +169,70 @@ rustyfi-engine::pipeline::run()
    │     └─ doctor ⭐ (--deep) an agentic loop that reads, searches, edits, and
    │                  re-checks the crate until it compiles or the budget caps —
    │                  src-confined and snapshot-reverted, so it can never make
-   │                  the crate worse than it found it
+   │                  the crate worse than it found it; also engages on behavioral
+   │                  mismatches (keeps edits only if the crate still compiles AND
+   │                  mismatches strictly decrease, else reverts)
    └─ [Package]     ZIP output + NEXT_STEPS.md (Done is sent only after the ZIP
                     is on disk — the download can never race it)
 ```
+
+---
+
+## The second oracle: behavioral verification
+
+`cargo check` tells you the translation compiles. Behavioral verification tells
+you whether it *runs the same way*.
+
+For CLI tools, a translation run auto-mines a fixture corpus from the project's
+README and `--help` output, runs the **source binary** on each case to capture
+golden stdout/stderr/exit-code, then — once the crate compiles — diffs the Rust
+target against it. This is **differential testing on a corpus of exercised
+cases**, not a proof of equivalence. It tells you: for every input in the
+fixture set, the source and the Rust produce identical observable output. The
+source binary is ground truth.
+
+Non-deterministic cases are quarantined automatically: if running the source
+twice produces different output, that case is excluded from the corpus rather
+than silently letting it flap.
+
+Two artifacts land in the output crate:
+
+- **`behavior.yaml`** — the fixture corpus (build + run commands, per-stream
+  compare mode, normalize rules, and per-case golden `expect`). Human-readable
+  and hand-editable.
+- **`behavior_report.json`** — the diff of the last run: pass/fail per case,
+  actual vs. expected output for every divergence.
+
+**`behavior.yaml` compare modes** (per stream):
+
+| Mode | Meaning |
+|---|---|
+| `exact` | byte-for-byte match |
+| `ignore` | stream not checked |
+| `normalized` | apply rules first (e.g. `strip_trailing_ws`, regex mask), then exact-match |
+
+**The review loop:**
+
+```bash
+# After a translation, check the report:
+cat ./myapp-rust/behavior_report.json
+
+# Edit behavior.yaml (add cases, adjust compare modes, add normalize rules),
+# then re-verify the already-built crate without re-translating:
+rustyfi verify-behavior ./myapp-rust
+# exit 0 = behaviors match · exit 1 = divergence
+```
+
+`--deep` now also drives the doctor on behavioral mismatches — it will read,
+edit, and re-verify the crate, keeping changes only when the crate still
+compiles *and* the mismatch count strictly decreases.
+
+**Honest scope:** behavioral verification is CLI-tool-only for now (library and
+HTTP service support is planned). Because it runs the source project, it is a
+local/CLI-only phase — the hosted web flow does not execute uploaded code.
+Skip it with `--no-behavior`.
+
+---
 
 Two ideas do most of the work, and both came from asking *"what does the compiler
 already know that we're throwing away?"*
@@ -186,8 +252,9 @@ already know that we're throwing away?"*
 
 ## Why it's trustworthy
 
-- **`cargo check` is the oracle**, not the model — every claim of "it compiles" is
-  the compiler's, not the LLM's.
+- **Two oracles, not one** — `cargo check` verifies compilation; behavioral
+  verification diffs the source and Rust binaries on a fixture corpus. Both run
+  before the result is declared. Neither is the model's word.
 - **Honest output** — if files fell back to stubs or the build isn't clean, the UI
   and `NEXT_STEPS.md` say so plainly.
 - **Deterministic where possible** — module wiring, dedup, dependency repair, and
@@ -247,6 +314,8 @@ crates/
 │   ├── rustfix.rs      # apply rustc's own machine-applicable suggestions
 │   ├── fix_context.rs  # ⭐ trait defs + rustc --explain + impls for fix prompts
 │   ├── agent_fix.rs    # ⭐ the doctor — guarded, budgeted, snapshot-reverted
+│   ├── behavior/       # ⭐ behavioral verification — corpus mining, golden capture,
+│   │                   #   diff runner, behavior.yaml + behavior_report.json writer
 │   ├── dedup_items.rs  # syn-based duplicate-definition removal
 │   ├── llm.rs          # blocking LLM client (OpenAI-compat + Grok OAuth)
 │   └── pipeline.rs     # end-to-end run() — phased, checkpointed, parallel

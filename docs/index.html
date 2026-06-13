@@ -280,9 +280,48 @@
     </div>
   </section>
 
+  <!-- behavioral oracle -->
+  <section id="oracle">
+    <div class="sec-head"><span class="n">04</span><h2>Two oracles.</h2><span class="rule"></span></div>
+    <div class="bento">
+      <div class="card wide">
+        <span class="kicker">behavioral verification · second oracle</span>
+        <h3>The compiler proves it's valid Rust. The second oracle proves it's the same app.</h3>
+        <p>For CLI tools, Rustyfi mines a fixture corpus from the project's README and <code>--help</code> output, captures golden stdout / stderr / exit-code from the <em>original</em> program, then — once the translation compiles — runs the same inputs against the Rust binary and diffs the results. The original is the ground truth. A passing diff means the same behavior on the tested cases; it's differential testing, not a proof of equivalence. Rustyfi is honest about that distinction.</p>
+        <p style="margin-top:0.9rem;color:var(--muted)">Artifacts emitted: <code>behavior.yaml</code> (the corpus) and <code>behavior_report.json</code> (per-case pass/fail with diffs). Under <code>--deep</code>, the agentic doctor also repairs behavioral mismatches — keeping an edit only when behavior improves <em>and</em> the crate still compiles. A regression in either direction is reverted.</p>
+      </div>
+
+      <div class="card" style="grid-column:span 5">
+        <span class="kicker">what the compiler can't see</span>
+        <h3>A real divergence, caught</h3>
+        <p style="margin-bottom:0.9rem">On the bundled calculator example the compiler gave a clean bill of health. The behavioral oracle found a difference the type system is blind to:</p>
+        <div class="term">
+          <div class="bar-top"><i style="background:var(--rust)"></i><i style="background:var(--amber)"></i><i style="background:var(--green)"></i><span class="t">behavior_report.json · calc · divide</span></div>
+<pre><span class="c-cmt"># input: 33 / 3</span>
+<span class="c-out">original (Go)</span>   stdout: <span class="c-acc">11</span>
+<span class="c-out">translated (Rust)</span> stdout: <span class="c-acc">11.0000000000</span>
+<span class="c-cmt"># exit codes match · stderr empty on both</span>
+<span class="c-cmt">→ FAIL  (stdout differs)</span></pre>
+        </div>
+      </div>
+
+      <div class="card" style="grid-column:span 7">
+        <span class="kicker">oracle pipeline</span>
+        <h3>How the second oracle runs</h3>
+        <ul class="clean" style="margin-top:0.8rem">
+          <li><b>Mine corpus</b> — extract example invocations from README and <code>--help</code>; deduplicate and normalise.</li>
+          <li><b>Capture golden</b> — run each case against the <em>source</em> binary; record stdout, stderr, exit code.</li>
+          <li><b>Diff Rust target</b> — once <code>cargo build</code> succeeds, replay every case and compare byte-for-byte.</li>
+          <li><b>Emit artifacts</b> — <code>behavior.yaml</code> and <code>behavior_report.json</code>; piped into CI or read by the doctor.</li>
+          <li><b><code>--deep</code> repair</b> — agentic doctor targets only failing cases; edits kept only when diff improves <em>and</em> still compiles.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
   <!-- honesty -->
   <section id="honest">
-    <div class="sec-head"><span class="n">04</span><h2>The honest version</h2><span class="rule"></span></div>
+    <div class="sec-head"><span class="n">05</span><h2>The honest version</h2><span class="rule"></span></div>
     <div class="bento">
       <div class="card wide">
         <p style="color:var(--text);font-size:1.05rem;line-height:1.7">Translating real software between languages is not a solved problem, and Rustyfi doesn't pretend otherwise. <b>Pure-logic projects</b> — CLIs, libraries, parsers, algorithms — usually come out compiling clean: drop them, build them, run them. <b>Complex real-world apps</b> — framework-heavy, native-library-bound — come out as a compiling skeleton with your modules wired up and the type-chaos eliminated, plus an honest <code>NEXT_STEPS.md</code> punch-list of what's left.</p>

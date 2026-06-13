@@ -1517,7 +1517,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rustyfi-cli"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "console",
@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "rustyfi-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "rustyfi-engine"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1565,7 +1565,7 @@ dependencies = [
 
 [[package]]
 name = "rustyfi-server"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "axum",
