@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use console::style;
-use rustyfi_engine::pipeline::{run, DeepFixSummary, RunConfig, RunResult};
+use rustyfi_engine::pipeline::{run, BehaviorSummary, DeepFixSummary, RunConfig, RunResult};
 use rustyfi_engine::EngineError;
 
 #[derive(Parser)]
@@ -24,10 +24,12 @@ use rustyfi_engine::EngineError;
     version,
     about = "Translate any codebase to Rust. cargo check is the oracle. 🎺🦀",
     long_about = None,
+    subcommand_negates_reqs = true,
 )]
 struct Cli {
-    /// Source project: a directory, or a .zip archive.
-    source: PathBuf,
+    /// Source project: a directory, or a .zip archive. (translate mode)
+    #[arg(required = true)]
+    source: Option<PathBuf>,
 
     /// Output directory for the generated Rust crate [default: <name>-rust].
     #[arg(short, long)]
@@ -66,6 +68,22 @@ struct Cli {
     /// RUSTYFI_DEEP_FIX_TIMEOUT.
     #[arg(long)]
     deep: bool,
+
+    /// Skip the behavioral-equivalence phase (no source build/run).
+    #[arg(long)]
+    no_behavior: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(clap::Subcommand)]
+enum Commands {
+    /// Verify a translated crate's runtime behavior against its behavior.yaml.
+    VerifyBehavior {
+        /// Path to the translated Rust crate directory (containing behavior.yaml).
+        crate_dir: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -80,6 +98,11 @@ fn main() -> ExitCode {
 }
 
 fn real_main(cli: Cli) -> Result<ExitCode, String> {
+    // Handle subcommands before any LLM preflight.
+    if let Some(Commands::VerifyBehavior { crate_dir }) = &cli.command {
+        return verify_behavior_cmd(crate_dir, cli.json);
+    }
+
     // Set the deep-fix flag before preflight and run so the engine picks it up.
     // SAFETY: the CLI is single-threaded at this point; no other thread can
     // observe the env var until after `run` (which is called below).
@@ -89,11 +112,15 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
 
     preflight_env()?;
 
-    // Resolve the source into a directory (extracting a .zip if needed).
-    let raw = cli
+    let source = cli
         .source
+        .clone()
+        .expect("clap guarantees source unless a subcommand is present");
+
+    // Resolve the source into a directory (extracting a .zip if needed).
+    let raw = source
         .canonicalize()
-        .map_err(|_| format!("source not found: {}", cli.source.display()))?;
+        .map_err(|_| format!("source not found: {}", source.display()))?;
     let _scratch; // keeps a tempdir alive for the whole run
     let source_dir = if raw.is_file() {
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
@@ -109,7 +136,7 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
     let name = cli
         .name
         .clone()
-        .unwrap_or_else(|| derive_name(&source_dir, &cli.source));
+        .unwrap_or_else(|| derive_name(&source_dir, &source));
     let output = cli
         .output
         .clone()
@@ -148,6 +175,7 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
             .unwrap_or(16),
         tier_fast_tokens: env_usize("RUSTYFI_TIER_FAST").unwrap_or(400),
         tier_mid_tokens: env_usize("RUSTYFI_TIER_MID").unwrap_or(3000),
+        verify_behavior: !cli.no_behavior,
     };
 
     let started = std::time::Instant::now();
@@ -179,6 +207,40 @@ fn real_main(cli: Cli) -> Result<ExitCode, String> {
         print_summary(&result, &output, files);
     }
     Ok(if result.cargo_clean {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    })
+}
+
+fn verify_behavior_cmd(crate_dir: &std::path::Path, json: bool) -> Result<ExitCode, String> {
+    use rustyfi_engine::behavior::{verify, BehaviorSpec};
+    let spec_path = crate_dir.join("behavior.yaml");
+    let yaml = std::fs::read_to_string(&spec_path)
+        .map_err(|e| format!("no behavior.yaml in {}: {e}", crate_dir.display()))?;
+    let spec: BehaviorSpec =
+        serde_yaml::from_str(&yaml).map_err(|e| format!("invalid behavior.yaml: {e}"))?;
+    let work = crate_dir.join(".behavior-work");
+    let _ = std::fs::create_dir_all(&work);
+    let report = verify(&spec, crate_dir, &work).map_err(|e| format!("verify failed: {e}"))?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else {
+        eprintln!(
+            "\nbehavior: {} ({}/{} matched, {} quarantined)\n",
+            report.name, report.matched, report.total, report.quarantined
+        );
+        for c in &report.cases {
+            eprintln!("  {} {}", if c.matched { "✓" } else { "✗" }, c.name);
+            for d in &c.diffs {
+                eprintln!("      {d}");
+            }
+        }
+    }
+    Ok(if report.passed {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -268,6 +330,12 @@ fn build_json_summary(
         .map(deep_fix_to_json)
         .unwrap_or(serde_json::Value::Null);
 
+    let behavior = r
+        .behavior
+        .as_ref()
+        .map(behavior_to_json)
+        .unwrap_or(serde_json::Value::Null);
+
     serde_json::json!({
         "crate_name": r.crate_name,
         "crate_path": output.to_string_lossy(),
@@ -284,6 +352,7 @@ fn build_json_summary(
         "fix_model": fix_model,
         "exit_code": if r.cargo_clean { 0 } else { 1 },
         "deep_fix": deep_fix,
+        "behavior": behavior,
     })
 }
 
@@ -293,6 +362,16 @@ fn deep_fix_to_json(s: &DeepFixSummary) -> serde_json::Value {
         "start_errors": s.start_errors,
         "end_errors": s.end_errors,
         "tool_calls": s.tool_calls,
+    })
+}
+
+fn behavior_to_json(b: &BehaviorSummary) -> serde_json::Value {
+    serde_json::json!({
+        "ran": b.ran,
+        "verified": b.verified,
+        "matched": b.matched,
+        "total": b.total,
+        "quarantined": b.quarantined,
     })
 }
 
@@ -465,6 +544,8 @@ mod tests {
         assert_eq!(v["exit_code"], 1);
         // deep_fix absent → null
         assert_eq!(v["deep_fix"], serde_json::Value::Null);
+        // behavior absent → null
+        assert_eq!(v["behavior"], serde_json::Value::Null);
     }
 
     #[test]
@@ -500,5 +581,65 @@ mod tests {
         assert_eq!(df["start_errors"], 10);
         assert_eq!(df["end_errors"], 0);
         assert_eq!(df["tool_calls"], 8);
+    }
+
+    #[test]
+    fn json_summary_behavior_null_when_absent() {
+        let r = RunResult {
+            zip: vec![],
+            crate_name: "demo".into(),
+            language: "python".into(),
+            files_failed: 0,
+            cargo_clean: true,
+            error_count: 0,
+            todo_count: 0,
+            files_translated: 3,
+            deep_fix: None,
+            behavior: None,
+        };
+        let v = build_json_summary(
+            &r,
+            Path::new("/out/demo-rust"),
+            3,
+            10.0,
+            "deepseek-chat",
+            "deepseek-chat",
+        );
+        assert_eq!(v["behavior"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn json_summary_behavior_fields_when_present() {
+        let r = RunResult {
+            zip: vec![],
+            crate_name: "demo".into(),
+            language: "python".into(),
+            files_failed: 0,
+            cargo_clean: true,
+            error_count: 0,
+            todo_count: 0,
+            files_translated: 3,
+            deep_fix: None,
+            behavior: Some(BehaviorSummary {
+                ran: true,
+                verified: true,
+                matched: 2,
+                total: 3,
+                quarantined: 1,
+            }),
+        };
+        let v = build_json_summary(
+            &r,
+            Path::new("/out/demo-rust"),
+            3,
+            10.0,
+            "deepseek-chat",
+            "deepseek-chat",
+        );
+        assert_eq!(v["behavior"]["matched"], 2);
+        assert_eq!(v["behavior"]["verified"], true);
+        assert_eq!(v["behavior"]["ran"], true);
+        assert_eq!(v["behavior"]["total"], 3);
+        assert_eq!(v["behavior"]["quarantined"], 1);
     }
 }
