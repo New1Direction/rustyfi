@@ -55,6 +55,11 @@ pub struct RunConfig {
     pub tier_fast_tokens: usize,
     /// Token threshold below which the mid model tier is used (default: 3000).
     pub tier_mid_tokens: usize,
+    /// When true, run the behavioral-equivalence phase (mine + capture golden
+    /// from the source + verify the target). Requires the SOURCE toolchain and
+    /// executes the source project, so callers enable it only where that is
+    /// trusted (CLI/local). The server leaves it false (no executing uploads).
+    pub verify_behavior: bool,
 }
 
 impl Default for RunConfig {
@@ -69,6 +74,7 @@ impl Default for RunConfig {
             parallel: 16,
             tier_fast_tokens: 400,
             tier_mid_tokens: 3_000,
+            verify_behavior: false,
         }
     }
 }
@@ -144,6 +150,21 @@ pub struct DeepFixSummary {
     pub tool_calls: usize,
 }
 
+/// Summary of the behavioral-equivalence phase (populated when `verify_behavior`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BehaviorSummary {
+    /// The phase ran (mined + captured). False when gated off / skipped.
+    pub ran: bool,
+    /// The target was built and run against golden (false if it did not compile).
+    pub verified: bool,
+    pub matched: usize,
+    pub total: usize,
+    pub quarantined: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair: Option<crate::checkpoint::BehaviorRepair>,
+}
+
 /// Output of a completed pipeline run.
 pub struct RunResult {
     pub zip: Vec<u8>,
@@ -162,6 +183,8 @@ pub struct RunResult {
     pub files_translated: usize,
     /// Present when the agentic deep-fix pass ran (`--deep` / `RUSTYFI_DEEP_FIX=1`).
     pub deep_fix: Option<DeepFixSummary>,
+    /// Present when the behavioral phase ran (`verify_behavior`).
+    pub behavior: Option<BehaviorSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -325,6 +348,35 @@ where
             (cp, df)
         };
 
+    // ── Phase 5: Behavioral equivalence (gated on verify_behavior) ────────
+    let behavior_cp =
+        if let Some(cp) = store.read::<crate::checkpoint::BehaviorCheckpoint>("behavior") {
+            cp
+        } else {
+            let cp = phase_behavior(
+                &config,
+                &analysis_cp,
+                &scaffold_cp,
+                &verification_cp,
+                fix_llm.as_ref().unwrap_or(&llm),
+                &mut progress_cb,
+            );
+            store.write("behavior", &cp)?;
+            cp
+        };
+    let behavior = if behavior_cp.ran {
+        Some(BehaviorSummary {
+            ran: behavior_cp.ran,
+            verified: behavior_cp.verified,
+            matched: behavior_cp.matched,
+            total: behavior_cp.total,
+            quarantined: behavior_cp.quarantined,
+            repair: behavior_cp.repair.clone(),
+        })
+    } else {
+        None
+    };
+
     // ── Completion report ─────────────────────────────────────────────────
     // Tell the user exactly what's left to make the crate compile — system
     // libraries to install, inferred deps to verify, stubs and todo!() gaps.
@@ -335,6 +387,7 @@ where
         &translation_cp,
         &verification_cp,
         deep_fix.as_ref(),
+        Some(&behavior_cp),
     );
     let _ = fs::write(
         scaffold_cp.workspace_path.join("NEXT_STEPS.md"),
@@ -442,6 +495,7 @@ where
         todo_count: report.todo_count,
         files_translated: report.translated,
         deep_fix,
+        behavior,
     })
 }
 
@@ -1667,9 +1721,10 @@ where
             }
             Ok(snap) => {
                 let mut transport = crate::agent_fix::LlmTransport(llm);
-                let report = crate::agent_fix::run_doctor(ws, &mut transport, budget, &mut |msg| {
-                    emit(progress_cb, Progress::Note { message: msg })
-                });
+                let report =
+                    crate::agent_fix::run_doctor(ws, &mut transport, budget, None, &mut |msg| {
+                        emit(progress_cb, Progress::Note { message: msg })
+                    });
 
                 // After run_doctor the workspace is in the doctor's final state.
                 // Run a fresh cargo check so our local `exit_clean`,
@@ -1984,6 +2039,261 @@ fn render_errors(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 4.5: Behavioral equivalence
+// ---------------------------------------------------------------------------
+
+/// Keep the doctor's edits iff the crate still compiles AND behavioral
+/// mismatches strictly decreased.
+fn behavior_repair_accept(compiles: bool, start_mismatches: usize, end_mismatches: usize) -> bool {
+    compiles && end_mismatches < start_mismatches
+}
+
+fn behavior_repair<F: FnMut(Progress)>(
+    workspace: &Path,
+    spec: &crate::behavior::BehaviorSpec,
+    fix_llm: &crate::llm::LlmClient,
+    start_mismatches: usize,
+    progress_cb: &mut F,
+) -> crate::checkpoint::BehaviorRepair {
+    use crate::agent_fix::{run_doctor, DoctorBudget, LlmTransport};
+    use crate::checkpoint::BehaviorRepair;
+
+    let none = |tc: usize| BehaviorRepair {
+        start_mismatches,
+        end_mismatches: start_mismatches,
+        tool_calls: tc,
+        kept: false,
+    };
+
+    let budget = DoctorBudget {
+        max_tool_calls: std::env::var("RUSTYFI_DEEP_FIX_BUDGET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(40),
+        max_wall_secs: std::env::var("RUSTYFI_DEEP_FIX_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1200),
+    };
+    let snap = match snapshot_src(workspace) {
+        Ok(s) => s,
+        Err(_) => return none(0),
+    };
+    let work = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(_) => return none(0),
+    };
+
+    let mut transport = LlmTransport(fix_llm);
+    let report = run_doctor(
+        workspace,
+        &mut transport,
+        budget,
+        Some((spec.clone(), work.path().to_path_buf())),
+        &mut |m| emit(progress_cb, Progress::Note { message: m }),
+    );
+
+    let compiles = crate::behavior::build_target_ok(spec, workspace, work.path());
+    let end_mismatches = match crate::behavior::verify(spec, workspace, work.path()) {
+        Ok(r) => r.total - r.matched,
+        Err(_) => start_mismatches,
+    };
+    let kept = behavior_repair_accept(compiles, start_mismatches, end_mismatches);
+    if !kept {
+        let _ = restore_src(workspace, &snap);
+    }
+    BehaviorRepair {
+        start_mismatches,
+        end_mismatches: if kept {
+            end_mismatches
+        } else {
+            start_mismatches
+        },
+        tool_calls: report.tool_calls_used,
+        kept,
+    }
+}
+
+fn phase_behavior<F: FnMut(Progress)>(
+    config: &RunConfig,
+    analysis: &AnalysisCheckpoint,
+    scaffold: &ScaffoldCheckpoint,
+    verification: &VerificationCheckpoint,
+    fix_llm: &crate::llm::LlmClient,
+    progress_cb: &mut F,
+) -> crate::checkpoint::BehaviorCheckpoint {
+    use crate::behavior::{generate_and_verify, source_side, target_side};
+    use crate::checkpoint::BehaviorCheckpoint;
+
+    let skip = |reason: &str| BehaviorCheckpoint {
+        ran: false,
+        verified: false,
+        mined: 0,
+        matched: 0,
+        total: 0,
+        quarantined: 0,
+        skipped_reason: Some(reason.to_string()),
+        repair: None,
+    };
+
+    if !config.verify_behavior {
+        return skip("behavior verification not enabled");
+    }
+    let source = match source_side(&analysis.language, &scaffold.crate_name) {
+        Some(s) => s,
+        None => {
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: format!(
+                        "Behavior: source language `{}` not yet supported — skipping.",
+                        analysis.language
+                    ),
+                },
+            );
+            return skip(&format!(
+                "unsupported source language: {}",
+                analysis.language
+            ));
+        }
+    };
+    let target = target_side(&scaffold.crate_name);
+
+    emit(
+        progress_cb,
+        Progress::Note {
+            message: "Behavior: mining cases + capturing golden output from the source…".into(),
+        },
+    );
+
+    // Build scratch lives OUTSIDE the crate tree (auto-cleaned), so source/target
+    // binaries never leak into the packaged ZIP.
+    let work = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => return skip(&format!("could not create behavior work dir: {e}")),
+    };
+
+    let out = generate_and_verify(
+        &analysis.source_dir,
+        &scaffold.workspace_path,
+        &scaffold.crate_name,
+        source,
+        target,
+        verification.exit_clean,
+        work.path(),
+    );
+
+    if let Some(yaml) = &out.spec_yaml {
+        let _ = std::fs::write(scaffold.workspace_path.join("behavior.yaml"), yaml);
+    }
+    if let Some(report) = &out.report {
+        if let Ok(json) = serde_json::to_string_pretty(report) {
+            let _ = std::fs::write(scaffold.workspace_path.join("behavior_report.json"), json);
+        }
+        emit(
+            progress_cb,
+            Progress::Note {
+                message: format!(
+                    "Behavior: {}/{} cases matched the original ({} quarantined as nondeterministic).",
+                    report.matched, report.total, report.quarantined
+                ),
+            },
+        );
+    } else if let Some(reason) = &out.skipped_reason {
+        emit(
+            progress_cb,
+            Progress::Note {
+                message: format!("Behavior: {reason}"),
+            },
+        );
+    }
+
+    // Capture initial counts from the verify report; may be overwritten by repair.
+    let (mut matched, mut total, mut quarantined) = out
+        .report
+        .as_ref()
+        .map(|r| (r.matched, r.total, r.quarantined))
+        .unwrap_or((0, 0, 0));
+
+    // ── Gated behavioral deep-fix pass ──────────────────────────────────────
+    // Fires only when: verified, RUSTYFI_DEEP_FIX is set, and there are mismatches.
+    let mut repair: Option<crate::checkpoint::BehaviorRepair> = None;
+    if out.verified
+        && std::env::var("RUSTYFI_DEEP_FIX").is_ok()
+        && out
+            .report
+            .as_ref()
+            .map(|r| r.matched < r.total)
+            .unwrap_or(false)
+    {
+        if let Some(spec) = &out.spec {
+            let report = out.report.as_ref().unwrap();
+            let start_mismatches = report.total - report.matched;
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: format!(
+                        "Behavior: {start_mismatches} mismatch(es) — engaging the deep-fix doctor…"
+                    ),
+                },
+            );
+            let info = behavior_repair(
+                &scaffold.workspace_path,
+                spec,
+                fix_llm,
+                start_mismatches,
+                progress_cb,
+            );
+            // Refresh behavior_report.json + counts from the (kept or reverted) state.
+            if let Ok(work2) = tempfile::tempdir() {
+                if let Ok(fresh) =
+                    crate::behavior::verify(spec, &scaffold.workspace_path, work2.path())
+                {
+                    if let Ok(json) = serde_json::to_string_pretty(&fresh) {
+                        let _ = std::fs::write(
+                            scaffold.workspace_path.join("behavior_report.json"),
+                            json,
+                        );
+                    }
+                    // Overwrite counts with the fresh values.
+                    matched = fresh.matched;
+                    total = fresh.total;
+                    quarantined = fresh.quarantined;
+                }
+            }
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: if info.kept {
+                        format!(
+                            "Behavior: deep-fix improved mismatches {}→{} ({} tool calls).",
+                            info.start_mismatches, info.end_mismatches, info.tool_calls
+                        )
+                    } else {
+                        format!(
+                            "Behavior: deep-fix did not improve behavior — reverted ({} tool calls).",
+                            info.tool_calls
+                        )
+                    },
+                },
+            );
+            repair = Some(info);
+        }
+    }
+
+    BehaviorCheckpoint {
+        ran: out.ran,
+        verified: out.verified,
+        mined: out.mined,
+        matched,
+        total,
+        quarantined,
+        skipped_reason: out.skipped_reason,
+        repair,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Phase 5: Packaging
 // ---------------------------------------------------------------------------
 
@@ -2130,6 +2440,50 @@ fn scan_src(workspace: &Path) -> SrcScan {
     }
 }
 
+/// Render the NEXT_STEPS "Behavior" section. Empty when the phase did not run.
+fn behavior_section(cp: Option<&crate::checkpoint::BehaviorCheckpoint>) -> String {
+    let Some(cp) = cp else { return String::new() };
+    if !cp.ran {
+        return String::new();
+    }
+    let mut s = String::from("\n## Behavior\n\n");
+    if cp.verified {
+        s.push_str(&format!(
+            "Verified against the original: **{}/{} cases matched** \
+             ({} quarantined as nondeterministic). See `behavior_report.json`.\n",
+            cp.matched, cp.total, cp.quarantined
+        ));
+        if cp.matched < cp.total {
+            s.push_str(
+                "\nReview the mismatches in `behavior_report.json`; \
+                 re-run `rustyfi verify-behavior .` after fixes.\n",
+            );
+        }
+    } else {
+        let reason = cp.skipped_reason.as_deref().unwrap_or("not verified");
+        s.push_str(&format!(
+            "Behavioral spec mined to `behavior.yaml` but not verified ({reason}).\n"
+        ));
+    }
+    if let Some(r) = &cp.repair {
+        if r.kept {
+            s.push_str(&format!(
+                "\nDeep-fix improved behavior: {}→{} mismatches ({} tool calls).\n",
+                r.start_mismatches, r.end_mismatches, r.tool_calls
+            ));
+        } else {
+            s.push_str(&format!(
+                "\nDeep-fix attempted but did not improve behavior; reverted ({} tool calls).\n",
+                r.tool_calls
+            ));
+        }
+    }
+    s.push_str(
+        "\nExtend `behavior.yaml` with more cases and re-run `rustyfi verify-behavior .`.\n",
+    );
+    s
+}
+
 /// Build the human-facing "what's left to compile" report.
 fn build_next_steps(
     analysis: &AnalysisCheckpoint,
@@ -2137,6 +2491,7 @@ fn build_next_steps(
     translation: &TranslationCheckpoint,
     verification: &VerificationCheckpoint,
     doctor: Option<&DeepFixSummary>,
+    behavior: Option<&crate::checkpoint::BehaviorCheckpoint>,
 ) -> NextSteps {
     let ws = &scaffold.workspace_path;
     let scan = scan_src(ws);
@@ -2329,6 +2684,7 @@ fn build_next_steps(
         md.push_str("\n\n");
     }
 
+    md.push_str(&behavior_section(behavior));
     md.push_str("---\n_Generated by Rustyfi 🎺 — `cargo check` is the truth, not the model._\n");
 
     // Concise terminal summary.
@@ -2793,6 +3149,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn behavior_repair_accepts_only_strict_improvement_that_compiles() {
+        assert!(behavior_repair_accept(true, 3, 1));
+        assert!(!behavior_repair_accept(true, 3, 3));
+        assert!(!behavior_repair_accept(false, 3, 0));
+        assert!(!behavior_repair_accept(true, 0, 0));
+    }
+
+    #[test]
     fn version_sanitiser_strips_trailing_junk() {
         // The exact garbage that broke the THC Hydra run's Cargo.toml.
         assert_eq!(
@@ -3083,5 +3447,91 @@ rstest = "0.18"
         assert_eq!(v["start_errors"], 10);
         assert_eq!(v["end_errors"], 3);
         assert_eq!(v["tool_calls"], 12);
+    }
+
+    #[test]
+    fn next_steps_includes_behavior_section_when_verified() {
+        let cp = crate::checkpoint::BehaviorCheckpoint {
+            ran: true,
+            verified: true,
+            mined: 4,
+            matched: 3,
+            total: 4,
+            quarantined: 1,
+            skipped_reason: None,
+            repair: None,
+        };
+        let md = behavior_section(Some(&cp));
+        assert!(md.contains("Behavior"));
+        assert!(md.contains("3/4"));
+        assert!(md.contains("behavior.yaml"));
+    }
+
+    #[test]
+    fn next_steps_behavior_section_empty_when_absent_or_not_run() {
+        assert!(behavior_section(None).is_empty());
+        let gated = crate::checkpoint::BehaviorCheckpoint {
+            ran: false,
+            verified: false,
+            mined: 0,
+            matched: 0,
+            total: 0,
+            quarantined: 0,
+            skipped_reason: Some("behavior verification not enabled".into()),
+            repair: None,
+        };
+        assert!(behavior_section(Some(&gated)).is_empty());
+    }
+
+    #[test]
+    fn next_steps_behavior_section_includes_repair_summary_when_kept() {
+        use crate::checkpoint::BehaviorRepair;
+        let cp = crate::checkpoint::BehaviorCheckpoint {
+            ran: true,
+            verified: true,
+            mined: 5,
+            matched: 1,
+            total: 5,
+            quarantined: 0,
+            skipped_reason: None,
+            repair: Some(BehaviorRepair {
+                start_mismatches: 4,
+                end_mismatches: 1,
+                tool_calls: 9,
+                kept: true,
+            }),
+        };
+        let md = behavior_section(Some(&cp));
+        assert!(md.contains("4→1"), "expected '4→1' in:\n{md}");
+        assert!(
+            md.contains("9 tool calls"),
+            "expected '9 tool calls' in:\n{md}"
+        );
+    }
+
+    #[test]
+    fn next_steps_behavior_section_includes_reverted_message_when_not_kept() {
+        use crate::checkpoint::BehaviorRepair;
+        let cp = crate::checkpoint::BehaviorCheckpoint {
+            ran: true,
+            verified: true,
+            mined: 3,
+            matched: 2,
+            total: 3,
+            quarantined: 0,
+            skipped_reason: None,
+            repair: Some(BehaviorRepair {
+                start_mismatches: 2,
+                end_mismatches: 2,
+                tool_calls: 5,
+                kept: false,
+            }),
+        };
+        let md = behavior_section(Some(&cp));
+        assert!(md.contains("reverted"), "expected 'reverted' in:\n{md}");
+        assert!(
+            md.contains("5 tool calls"),
+            "expected '5 tool calls' in:\n{md}"
+        );
     }
 }

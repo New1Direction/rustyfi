@@ -19,6 +19,10 @@ rustyfi_uploads/
 # Benchmark suite scratch space (clones + generated crates + per-run JSON)
 bench/.work/
 
+# Behavioral-oracle scratch space (built source/target binaries) + reports
+behavior/.work/
+behavior_report.json
+
 # Editor / OS junk
 .DS_Store
 .idea/

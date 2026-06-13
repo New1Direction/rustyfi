@@ -495,6 +495,11 @@ async fn translate_handler(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3_000),
+        // The server must NOT execute uploaded source: behavioral verification
+        // builds and runs the source project, which is unsafe for untrusted
+        // uploads without a sandbox (spec §4/§11). Capture/verify is CLI/local
+        // only; the server stays gated off.
+        verify_behavior: false,
     };
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();

@@ -142,6 +142,7 @@ fn phase_order() -> &'static [&'static str] {
         "contract",
         "translation",
         "verification",
+        "behavior",
         "packaging",
     ]
 }
@@ -242,10 +243,67 @@ pub struct VerificationCheckpoint {
     pub final_error_count: usize,
 }
 
+/// Outcome of the behavioral deep-fix repair pass.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehaviorRepair {
+    pub start_mismatches: usize,
+    pub end_mismatches: usize,
+    pub tool_calls: usize,
+    pub kept: bool,
+}
+
+/// Serializable output of the Behavior phase. `ran=false` means the phase was
+/// gated off or skipped (see `skipped_reason`); `verified=false` means golden
+/// was captured but the target was not run (it did not compile).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BehaviorCheckpoint {
+    pub ran: bool,
+    pub verified: bool,
+    pub mined: usize,
+    pub matched: usize,
+    pub total: usize,
+    pub quarantined: usize,
+    pub skipped_reason: Option<String>,
+    /// Behavioral deep-fix outcome (None = repair not run).
+    #[serde(default)]
+    pub repair: Option<BehaviorRepair>,
+}
+
 /// Serializable output of the Packaging phase.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackagingCheckpoint {
     pub zip_path: PathBuf,
     pub zip_bytes: usize,
     pub crate_name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn behavior_in_phase_order_between_verification_and_packaging() {
+        let order = phase_order();
+        let v = order.iter().position(|&p| p == "verification").unwrap();
+        let b = order.iter().position(|&p| p == "behavior").unwrap();
+        let p = order.iter().position(|&p| p == "packaging").unwrap();
+        assert!(v < b && b < p);
+    }
+
+    #[test]
+    fn behavior_checkpoint_round_trips() {
+        let cp = BehaviorCheckpoint {
+            ran: true,
+            verified: true,
+            mined: 3,
+            matched: 2,
+            total: 3,
+            quarantined: 1,
+            skipped_reason: None,
+            repair: None,
+        };
+        let json = serde_json::to_string(&cp).unwrap();
+        let back: BehaviorCheckpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(cp, back);
+    }
 }

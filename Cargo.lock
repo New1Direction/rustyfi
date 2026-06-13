@@ -1290,7 +1290,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1517,13 +1517,14 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rustyfi-cli"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "clap",
  "console",
  "indicatif",
  "rustyfi-engine",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "walkdir",
  "zip",
@@ -1531,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "rustyfi-core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1540,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "rustyfi-engine"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1550,18 +1551,21 @@ dependencies = [
  "rustyfi-core",
  "serde",
  "serde_json",
+ "serde_yaml",
+ "shlex",
  "syn",
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "uuid",
+ "wait-timeout",
  "walkdir",
  "zip",
 ]
 
 [[package]]
 name = "rustyfi-server"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -1671,6 +1675,19 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -2119,6 +2136,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 
 [[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
 name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2170,6 +2193,15 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "wait-timeout"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09ac3b126d3914f9849036f826e054cbabdc8519970b8998ddaf3b5bd3c65f11"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "walkdir"

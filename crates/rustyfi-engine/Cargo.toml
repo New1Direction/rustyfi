@@ -24,3 +24,6 @@ rayon        = "1"
 syn          = { version = "2", features = ["full", "parsing", "extra-traits"] }
 proc-macro2  = { version = "1.0.80", features = ["span-locations"] }
 quote        = "1"
+serde_yaml   = "0.9"
+wait-timeout = "0.2"
+shlex        = "1"

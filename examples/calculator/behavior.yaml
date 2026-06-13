@@ -1,0 +1,51 @@
+# Behavioral-equivalence spec: calculator, Go (source) → Rust (target).
+#
+# The SOURCE binary is ground truth. For every case below, the target must
+# produce the SAME stdout, stderr, and exit code as the source. This is
+# differential testing against a fixture corpus — it proves sameness on the
+# cases exercised here, not equivalence in general.
+#
+# Run from the repo root:   python3 behavior/check.py examples/calculator/behavior.yaml
+#
+# `dir`   is relative to the repo root; build/run commands execute with cwd=dir.
+# `{work}` expands to an absolute scratch dir (behavior/.work/, git-ignored).
+
+name: calculator
+
+source:
+  lang: go
+  dir: examples/calculator
+  build: ["go", "build", "-o", "{work}/calc-go", "."]
+  run: ["{work}/calc-go"]
+
+target:
+  lang: rust
+  dir: bench/.work/out/calculator
+  build: ["cargo", "build", "--quiet"]
+  run: ["target/debug/calculator"] # resolved relative to cwd=dir at run time
+
+# Streams checked for every case unless a case overrides `compare`.
+# Each stream is "exact" (must match the source byte-for-byte) or "ignore".
+compare:
+  stdout: exact
+  stderr: exact
+  exit_code: exact
+
+cases:
+  - name: precedence
+    args: ["2 + 3 * (4 - 1)"] # → 11
+
+  - name: right_assoc_power
+    args: ["2 ^ 10"] # → 1024
+
+  - name: nested_parens
+    args: ["(1 + 2) * (3 + 4)"] # → 21
+
+  - name: float_division
+    args: ["10 / 4"] # → 2.5
+
+  - name: trailing_operator_error
+    args: ["2 +"] # parse error → stderr + exit 1
+
+  - name: repl_session
+    stdin: "2 + 2\n7 * 6\n" # no args → REPL reads stdin
