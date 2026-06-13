@@ -239,6 +239,77 @@ pub fn capture_all(spec: &mut BehaviorSpec, root: &Path, work: &Path) -> Result<
     Ok(())
 }
 
+/// Per-case verification result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CaseResult {
+    pub name: String,
+    pub matched: bool,
+    pub diffs: Vec<String>,
+}
+
+/// Full verification report (also the on-disk `behavior_report.json` shape).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BehaviorReport {
+    pub name: String,
+    /// True when every non-quarantined case matched.
+    pub passed: bool,
+    /// Non-quarantined cases that matched.
+    pub matched: usize,
+    /// Non-quarantined cases (the gate denominator).
+    pub total: usize,
+    /// Cases excluded as nondeterministic.
+    pub quarantined: usize,
+    pub cases: Vec<CaseResult>,
+}
+
+/// Build the target, run every NON-quarantined case, and diff against golden.
+/// Quarantined cases are counted in `quarantined` but excluded from
+/// `total`/`matched`/`passed`. A case with no captured `expect` is skipped with
+/// a diagnostic diff (it should never happen after `capture_all`).
+pub fn verify(spec: &BehaviorSpec, root: &Path, work: &Path) -> Result<BehaviorReport, String> {
+    build_side(&spec.target, "target", root, work)?;
+    let default_compare = spec.compare;
+
+    let mut cases = Vec::new();
+    let mut matched = 0usize;
+    let mut total = 0usize;
+    let mut quarantined = 0usize;
+
+    for case in &spec.cases {
+        if case.nondeterministic {
+            quarantined += 1;
+            continue;
+        }
+        total += 1;
+        let diffs = match &case.expect {
+            None => vec!["no golden expect captured for this case".to_string()],
+            Some(expect) => {
+                let actual = run_case(&spec.target, case, root, work);
+                let compare = case.compare.unwrap_or(default_compare);
+                diff_case(expect, &actual, &compare, &spec.normalize)
+            }
+        };
+        let ok = diffs.is_empty();
+        if ok {
+            matched += 1;
+        }
+        cases.push(CaseResult {
+            name: case.name.clone(),
+            matched: ok,
+            diffs,
+        });
+    }
+
+    Ok(BehaviorReport {
+        name: spec.name.clone(),
+        passed: matched == total,
+        matched,
+        total,
+        quarantined,
+        cases,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -363,5 +434,86 @@ cases:
             clock.nondeterministic,
             "clock case should self-detect as nondeterministic"
         );
+    }
+
+    #[test]
+    fn verify_diffs_target_against_golden_and_skips_quarantined() {
+        use std::path::Path;
+        let spec = BehaviorSpec {
+            name: "t".into(),
+            source: Side {
+                lang: "sh".into(),
+                dir: ".".into(),
+                build: vec![],
+                run: vec![],
+            },
+            // target echoes its arg with a trailing '!' — so it MISMATCHES golden.
+            target: Side {
+                lang: "sh".into(),
+                dir: ".".into(),
+                build: vec![],
+                run: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf '%s!' \"$1\"".into(),
+                    "sh".into(),
+                ],
+            },
+            compare: CompareSpec::default(),
+            normalize: vec![],
+            cases: vec![
+                Case {
+                    name: "ok".into(),
+                    provenance: Provenance::Manual,
+                    args: vec!["hi".into()],
+                    stdin: None,
+                    env: Default::default(),
+                    expect: Some(Expect {
+                        stdout: "hi!".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }),
+                    nondeterministic: false,
+                    compare: None,
+                },
+                Case {
+                    name: "bad".into(),
+                    provenance: Provenance::Manual,
+                    args: vec!["hi".into()],
+                    stdin: None,
+                    env: Default::default(),
+                    expect: Some(Expect {
+                        stdout: "hi".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }),
+                    nondeterministic: false,
+                    compare: None,
+                },
+                Case {
+                    name: "skip".into(),
+                    provenance: Provenance::Manual,
+                    args: vec!["x".into()],
+                    stdin: None,
+                    env: Default::default(),
+                    expect: Some(Expect {
+                        stdout: "anything".into(),
+                        stderr: String::new(),
+                        exit_code: 0,
+                    }),
+                    nondeterministic: true,
+                    compare: None,
+                },
+            ],
+        };
+        let root = std::env::current_dir().unwrap();
+        let report = verify(&spec, &root, Path::new("/tmp")).unwrap();
+        assert_eq!(report.total, 2, "quarantined case excluded from total");
+        assert_eq!(report.matched, 1);
+        assert_eq!(report.quarantined, 1);
+        assert!(!report.passed);
+        let bad = report.cases.iter().find(|c| c.name == "bad").unwrap();
+        assert!(!bad.matched);
+        assert_eq!(bad.diffs.len(), 1);
     }
 }
