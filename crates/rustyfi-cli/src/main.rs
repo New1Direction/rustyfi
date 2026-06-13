@@ -439,6 +439,7 @@ mod tests {
             todo_count: 12,
             files_translated: 23,
             deep_fix: None,
+            behavior: None,
         };
         let v = build_json_summary(
             &r,
@@ -484,6 +485,7 @@ mod tests {
                 end_errors: 0,
                 tool_calls: 8,
             }),
+            behavior: None,
         };
         let v = build_json_summary(
             &r,

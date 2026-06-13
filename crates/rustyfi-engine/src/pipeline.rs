@@ -150,6 +150,21 @@ pub struct DeepFixSummary {
     pub tool_calls: usize,
 }
 
+/// Summary of the behavioral-equivalence phase (populated when `verify_behavior`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+// populated in Task 3 / read by the CLI in Task 5
+#[allow(dead_code)]
+pub struct BehaviorSummary {
+    /// The phase ran (mined + captured). False when gated off / skipped.
+    pub ran: bool,
+    /// The target was built and run against golden (false if it did not compile).
+    pub verified: bool,
+    pub matched: usize,
+    pub total: usize,
+    pub quarantined: usize,
+}
+
 /// Output of a completed pipeline run.
 pub struct RunResult {
     pub zip: Vec<u8>,
@@ -168,6 +183,8 @@ pub struct RunResult {
     pub files_translated: usize,
     /// Present when the agentic deep-fix pass ran (`--deep` / `RUSTYFI_DEEP_FIX=1`).
     pub deep_fix: Option<DeepFixSummary>,
+    /// Present when the behavioral phase ran (`verify_behavior`).
+    pub behavior: Option<BehaviorSummary>,
 }
 
 // ---------------------------------------------------------------------------
@@ -448,6 +465,7 @@ where
         todo_count: report.todo_count,
         files_translated: report.translated,
         deep_fix,
+        behavior: None, // populated in Task 3
     })
 }
 
