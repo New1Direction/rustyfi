@@ -1196,38 +1196,36 @@ pub fn prompt_fix_targeted(
 /// with no closing fence (which would otherwise leak the fence into the file
 /// and break parsing with an "unclosed delimiter" error).
 pub fn extract_rust_code(raw: &str) -> String {
+    // A wrapper fence is a line that, ignoring indentation, starts with ``` and
+    // is NOT a comment. Crucially, a ```rust inside a Rust DOC COMMENT
+    // (`/// ```rust`, common in translated code) is NOT a wrapper — hunting for
+    // the first ``` anywhere would drop the file's real head and leave an
+    // orphaned fragment. Only strip the genuine outer markdown wrapper.
+    fn is_fence(l: &&str) -> bool {
+        let t = l.trim_start();
+        t.starts_with("```") && !t.starts_with("//")
+    }
+
     let trimmed = raw.trim();
+    let lines: Vec<&str> = trimmed.lines().collect();
 
-    // 1. A complete fenced block → use its contents.
-    if let Some(inner) = extract_fenced(trimmed, "rust")
-        .or_else(|| extract_fenced(trimmed, "rs"))
-        .or_else(|| extract_fenced(trimmed, ""))
-    {
-        return inner.trim().to_string();
-    }
+    let Some(open) = lines.iter().position(is_fence) else {
+        // No wrapper fence (the instructed, common case) → raw code as-is, any
+        // doc-comment fences preserved.
+        return trimmed.to_string();
+    };
 
-    // 2. A dangling opening fence (truncated response) → drop the fence line and
-    //    any leading prose before it, plus a trailing fence if present.
-    if let Some(pos) = trimmed.find("```") {
-        let after_fence = &trimmed[pos..];
-        let body = after_fence
-            .find('\n')
-            .map(|nl| &after_fence[nl + 1..])
-            .unwrap_or("");
-        return body.trim().trim_end_matches("```").trim().to_string();
-    }
-
-    trimmed.to_string()
-}
-
-fn extract_fenced(text: &str, lang: &str) -> Option<String> {
-    let open = format!("```{lang}");
-    let start = text.find(&open)?;
-    let after_open = &text[start + open.len()..];
-    let body_start = after_open.find('\n').map(|i| i + 1).unwrap_or(0);
-    let body = &after_open[body_start..];
-    let end = body.rfind("```")?;
-    Some(body[..end].to_string())
+    // Closing wrapper fence is the next such line; absent (truncated response) →
+    // take everything to the end.
+    let close = lines[open + 1..]
+        .iter()
+        .position(is_fence)
+        .map(|p| open + 1 + p);
+    let body = match close {
+        Some(c) => lines[open + 1..c].join("\n"),
+        None => lines[open + 1..].join("\n"),
+    };
+    body.trim().to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -1542,6 +1540,41 @@ mod tests {
     fn passes_through_plain_code() {
         let raw = "fn a() -> i32 { 1 }\n";
         assert_eq!(extract_rust_code(raw), "fn a() -> i32 { 1 }");
+    }
+
+    #[test]
+    fn keeps_doc_comment_fences_intact() {
+        // Unwrapped code whose FIRST item carries a doc example with a ```rust
+        // block. The old logic grabbed that inner fence and dropped the head,
+        // orphaning the file. The head (the doc comment + fn) must survive.
+        let raw = "/// Example:\n\
+                   /// ```rust\n\
+                   /// let k = Ky::new();\n\
+                   /// ```\n\
+                   pub fn run() -> i32 { 1 }\n";
+        let out = extract_rust_code(raw);
+        assert!(out.starts_with("/// Example:"), "dropped the head:\n{out}");
+        assert!(out.contains("pub fn run()"), "lost the item:\n{out}");
+        assert!(
+            syn::parse_file(&out).is_ok(),
+            "result must be valid Rust:\n{out}"
+        );
+    }
+
+    #[test]
+    fn strips_wrapper_fence_even_with_inner_doc_fence() {
+        // A genuine wrapper fence around code that itself contains a doc fence:
+        // strip the outer wrapper, keep the inner doc example.
+        let raw = "```rust\n\
+                   /// ```text\n\
+                   /// example\n\
+                   /// ```\n\
+                   pub fn f() {}\n\
+                   ```";
+        let out = extract_rust_code(raw);
+        assert!(out.starts_with("/// ```text"), "{out}");
+        assert!(out.trim_end().ends_with("pub fn f() {}"), "{out}");
+        assert!(!out.ends_with("```"), "leaked wrapper fence:\n{out}");
     }
 
     // ── B4: prompt_extract_contract_retry ─────────────────────────────────
