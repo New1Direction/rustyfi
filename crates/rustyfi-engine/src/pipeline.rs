@@ -1677,7 +1677,19 @@ where
                             // model) can re-introduce duplicate definitions/uses
                             // that the translation-time dedup would have caught.
                             let fixed = crate::scaffold::normalize_module_content(&repaired);
-                            let _ = fs::write(path, fixed);
+                            // Never overwrite a file with output that does not
+                            // parse — a truncated fix response would replace a
+                            // flawed-but-parseable file with a fragment that can
+                            // never compile and that suppresses every other
+                            // file's diagnostics. Keep the previous version.
+                            if syn::parse_file(&fixed).is_ok() {
+                                let _ = fs::write(path, fixed);
+                            } else {
+                                warn!(
+                                    "fix-loop output for {} did not parse — keeping the previous version",
+                                    path.display()
+                                );
+                            }
                         }
                         Err(EngineError::Config(msg)) => {
                             // Auth died mid-verify — stop here, the crate is
