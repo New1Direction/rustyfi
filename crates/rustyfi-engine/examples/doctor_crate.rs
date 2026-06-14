@@ -66,9 +66,14 @@ fn main() {
         "  start={} end={} calls={} secs={}",
         report.start_errors, report.end_errors, report.tool_calls_used, report.wall_secs
     );
+    eprintln!("  summary: {}", report.summary);
     // One machine-readable line to stdout for tabulating across crates.
     println!(
-        "{dir}\tstart={}\tend={}\tcalls={}\tsecs={}",
-        report.start_errors, report.end_errors, report.tool_calls_used, report.wall_secs
+        "{dir}\tstart={}\tend={}\tcalls={}\tsecs={}\tsummary={}",
+        report.start_errors,
+        report.end_errors,
+        report.tool_calls_used,
+        report.wall_secs,
+        report.summary,
     );
 }
