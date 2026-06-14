@@ -44,8 +44,15 @@ fn main() {
         .expect("usage: doctor_crate <crate-dir>");
     let src = Path::new(&dir);
 
-    let tmp = tempfile::TempDir::new().expect("temp dir");
-    let ws = tmp.path();
+    // Optional 2nd arg: a persistent destination to leave the doctored crate in
+    // (so the result can be verified independently). Default: an auto-cleaned temp.
+    let dest = std::env::args().nth(2);
+    let _tmp = tempfile::TempDir::new().ok();
+    let ws: std::path::PathBuf = match &dest {
+        Some(d) => std::path::PathBuf::from(d),
+        None => _tmp.as_ref().expect("temp dir").path().to_path_buf(),
+    };
+    let ws = ws.as_path();
     copy_crate(src, ws);
 
     let client = LlmClient::for_fixing()
