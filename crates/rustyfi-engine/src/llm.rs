@@ -1,4 +1,6 @@
 use serde_json::json;
+use std::io::{Read as _, Write as _};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -19,6 +21,16 @@ pub enum Provider {
     },
     /// xAI Grok via grok-build OAuth — reads ~/.grok/auth.json
     Grok,
+    /// Local Claude Code CLI (`claude -p`) as a completion backend. Drives the
+    /// machine's own Claude Code login (subscription/OAuth) rather than an API
+    /// key, so the compile-fix doctor can run on a Claude-class model with no
+    /// separate key/spend. The child process is spawned with `ANTHROPIC_API_KEY`
+    /// removed (unless `RUSTYFI_CLAUDE_KEEP_KEY` is set) so `claude` falls back
+    /// to its own login instead of a possibly gateway-scoped inherited key.
+    ClaudeCli {
+        /// Binary to invoke (override with `RUSTYFI_CLAUDE_BIN`; default `claude`).
+        bin: String,
+    },
 }
 
 /// Read env `primary`; if unset/empty, fall back to `fallback`.
@@ -63,6 +75,14 @@ impl Provider {
             .to_lowercase();
         match kind.as_str() {
             "grok" | "xai" => Ok(Provider::Grok),
+            "claude" | "claude_cli" | "claude-cli" | "claudecode" | "claude-code" => {
+                // No API key required — the CLI uses the machine's Claude Code login.
+                let bin = std::env::var("RUSTYFI_CLAUDE_BIN")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "claude".to_string());
+                Ok(Provider::ClaudeCli { bin })
+            }
             _ => {
                 let raw = api_key.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
                     EngineError::Config(
@@ -101,6 +121,7 @@ impl Provider {
                 Some(&api_keys[idx])
             }
             Provider::Grok => None,
+            Provider::ClaudeCli { .. } => None,
         }
     }
 }
@@ -363,6 +384,7 @@ impl LlmClient {
     ) -> Result<Self, EngineError> {
         let default_model = match &provider {
             Provider::Grok => "grok-build".to_string(),
+            Provider::ClaudeCli { .. } => "opus".to_string(),
             Provider::OpenAi { .. } => "google/gemini-2.5-flash".to_string(),
         };
         let model = model_override.unwrap_or(default_model);
@@ -424,6 +446,11 @@ impl LlmClient {
         user: &str,
         model: &str,
     ) -> Result<String, EngineError> {
+        // Local Claude Code CLI: shell out instead of making an HTTP request.
+        if let Provider::ClaudeCli { bin } = &self.provider {
+            return self.claude_cli_call(bin, system, user, model);
+        }
+
         let (url, auth_header) = match &self.provider {
             Provider::OpenAi { base_url, .. } => {
                 let key = self
@@ -439,6 +466,7 @@ impl LlmClient {
                 format!("{GROK_API_BASE}/chat/completions"),
                 format!("Bearer {}", self.grok_jwt()?),
             ),
+            Provider::ClaudeCli { .. } => unreachable!("handled above"),
         };
 
         let body = json!({
@@ -525,6 +553,26 @@ impl LlmClient {
         messages: &[serde_json::Value],
         tools: &serde_json::Value,
     ) -> Result<(AssistantTurn, serde_json::Value), EngineError> {
+        // Local Claude Code CLI: there is no OpenAI tool-calling wire protocol,
+        // so flatten the conversation + tool catalogue into a single prompt and
+        // return the model's reply as text. The doctor's driver loop already
+        // parses a `{"tool": …, "args": …}` JSON action out of a text turn
+        // (see SYSTEM_DOCTOR rule 6 and agent_fix::parse_action_reply), so the
+        // whole agentic loop works unchanged with a text-only backend.
+        if let Provider::ClaudeCli { bin } = &self.provider {
+            let tools_block = render_tools_for_text(tools);
+            let convo = render_conversation_for_text(messages);
+            let prompt = format!(
+                "{tools_block}\n\n--- CONVERSATION SO FAR ---\n{convo}\n\
+                 Reply with your next action now as exactly one JSON object: \
+                 {{\"tool\": \"<name>\", \"args\": {{ … }}}}."
+            );
+            let model = self.model.clone();
+            let text = self.claude_cli_call(bin, system, &prompt, &model)?;
+            let raw = json!({ "role": "assistant", "content": text.clone() });
+            return Ok((AssistantTurn::Text(text), raw));
+        }
+
         let (url, auth_header) = match &self.provider {
             Provider::OpenAi { base_url, .. } => {
                 let key = self
@@ -540,6 +588,7 @@ impl LlmClient {
                 format!("{GROK_API_BASE}/chat/completions"),
                 format!("Bearer {}", self.grok_jwt()?),
             ),
+            Provider::ClaudeCli { .. } => unreachable!("handled above"),
         };
 
         let body = build_tools_request_body(&self.model, system, messages, tools);
@@ -585,13 +634,231 @@ impl LlmClient {
         parse_tools_response(val)
     }
 
+    /// Drive the local Claude Code CLI as a one-shot completion backend.
+    ///
+    /// Spawns `claude -p --output-format json --model <model> --system-prompt
+    /// <system>` with the user prompt on stdin, removes `ANTHROPIC_API_KEY` from
+    /// the child environment (so `claude` uses the machine's own login rather
+    /// than a possibly gateway-scoped inherited key — override with
+    /// `RUSTYFI_CLAUDE_KEEP_KEY`), and parses the `result` field out of the JSON
+    /// envelope. Runs from a temp dir so a project-local `CLAUDE.md` can't leak
+    /// into the prompt. Bounded by `self.timeout_secs`.
+    fn claude_cli_call(
+        &self,
+        bin: &str,
+        system: &str,
+        prompt: &str,
+        model: &str,
+    ) -> Result<String, EngineError> {
+        let args = claude_command_args(model, system);
+        debug!("spawn {bin} -p (model={model})");
+
+        let mut cmd = Command::new(bin);
+        cmd.args(&args)
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if std::env::var("RUSTYFI_CLAUDE_KEEP_KEY").is_err() {
+            cmd.env_remove("ANTHROPIC_API_KEY");
+            cmd.env_remove("ANTHROPIC_AUTH_TOKEN");
+        }
+
+        let mut child = cmd.spawn().map_err(|e| {
+            EngineError::Config(format!(
+                "failed to launch `{bin}` — is the Claude Code CLI installed and on PATH? \
+                 (set RUSTYFI_CLAUDE_BIN to override): {e}"
+            ))
+        })?;
+
+        // Feed the prompt on a dedicated thread so a large stdin write can't
+        // deadlock against the child filling its stdout pipe.
+        let mut stdin = child.stdin.take().expect("stdin piped");
+        let prompt_owned = prompt.to_string();
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(prompt_owned.as_bytes());
+            // stdin dropped here → EOF for the child.
+        });
+        let mut stdout = child.stdout.take().expect("stdout piped");
+        let reader = std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stdout.read_to_string(&mut buf);
+            buf
+        });
+        let mut stderr = child.stderr.take().expect("stderr piped");
+        let err_reader = std::thread::spawn(move || {
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        });
+
+        // Poll for exit with a wall-clock cap; kill on timeout.
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(self.timeout_secs);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(EngineError::Llm(format!(
+                            "`claude` timed out after {}s (model={model})",
+                            self.timeout_secs
+                        )));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => return Err(EngineError::Llm(format!("`claude` wait failed: {e}"))),
+            }
+        }
+
+        let _ = writer.join();
+        let out = reader.join().unwrap_or_default();
+        let err = err_reader.join().unwrap_or_default();
+
+        if out.trim().is_empty() {
+            return Err(EngineError::Llm(format!(
+                "`claude` produced no output (stderr: {})",
+                err.trim().chars().take(400).collect::<String>()
+            )));
+        }
+        parse_claude_result(&out)
+    }
+
     /// Returns true if this client is using the Grok provider.
     pub fn is_grok(&self) -> bool {
         matches!(self.provider, Provider::Grok)
     }
+    /// Returns true if this client drives the local Claude Code CLI.
+    pub fn is_claude_cli(&self) -> bool {
+        matches!(self.provider, Provider::ClaudeCli { .. })
+    }
     pub fn model(&self) -> &str {
         &self.model
     }
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code CLI helpers (pure — unit-testable without spawning a process)
+// ---------------------------------------------------------------------------
+
+/// Build the argument vector for a one-shot `claude -p` completion call.
+fn claude_command_args(model: &str, system: &str) -> Vec<String> {
+    vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+        "--model".to_string(),
+        model.to_string(),
+        "--no-session-persistence".to_string(),
+        // Use the CLI as a pure model backend: don't load MCP servers or skills
+        // (saves per-call startup and keeps the user's tool stack out of the
+        // prompt). NOT `--bare` — that forces ANTHROPIC_API_KEY auth and would
+        // break the subscription/OAuth login this provider relies on.
+        "--strict-mcp-config".to_string(),
+        "--disable-slash-commands".to_string(),
+        // Replace the default Claude Code system prompt with ours so the model
+        // behaves as a pure completion backend rather than a coding agent.
+        "--system-prompt".to_string(),
+        system.to_string(),
+    ]
+}
+
+/// Parse the assistant text out of `claude -p --output-format json` output.
+///
+/// The envelope looks like `{"type":"result","subtype":"success","is_error":
+/// false,"result":"…","api_error_status":…}`. Auth failures (401/403) become a
+/// `Config` error so the pipeline aborts early instead of burning the retry
+/// budget identically on every call.
+fn parse_claude_result(stdout: &str) -> Result<String, EngineError> {
+    let val: serde_json::Value = serde_json::from_str(stdout.trim())
+        .or_else(|_| {
+            // The CLI may emit a warning line before the JSON; take the last
+            // line that parses as a JSON object.
+            stdout
+                .lines()
+                .rev()
+                .find_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+                .ok_or(())
+        })
+        .map_err(|_| {
+            EngineError::Llm(format!(
+                "could not parse `claude` JSON output: {}",
+                stdout.chars().take(400).collect::<String>()
+            ))
+        })?;
+
+    let result = val["result"].as_str().unwrap_or("").to_string();
+    if val["is_error"].as_bool().unwrap_or(false) {
+        let status = val["api_error_status"].as_u64();
+        if matches!(status, Some(401) | Some(403)) {
+            return Err(EngineError::Config(format!(
+                "Claude Code CLI auth failed (HTTP {}). The child process drops ANTHROPIC_API_KEY \
+                 so `claude` uses your Claude Code login — run `claude` once interactively to sign \
+                 in, or set RUSTYFI_CLAUDE_KEEP_KEY=1 to use ANTHROPIC_API_KEY instead. Detail: {result}",
+                status.unwrap_or(0)
+            )));
+        }
+        return Err(EngineError::Llm(format!(
+            "`claude` reported an error: {result}"
+        )));
+    }
+    if result.trim().is_empty() {
+        return Err(EngineError::Llm(
+            "`claude` returned an empty result — retrying".to_string(),
+        ));
+    }
+    Ok(result)
+}
+
+/// Render the doctor's OpenAI tool catalogue into a compact text description so
+/// a text-only backend (the CLI) knows the tool names and their argument keys.
+fn render_tools_for_text(tools: &serde_json::Value) -> String {
+    let Some(arr) = tools.as_array() else {
+        return String::new();
+    };
+    let mut lines = vec![
+        "AVAILABLE TOOLS — choose exactly one per turn and call it as a JSON action:".to_string(),
+    ];
+    for t in arr {
+        let f = &t["function"];
+        let Some(name) = f["name"].as_str() else {
+            continue;
+        };
+        let desc = f["description"].as_str().unwrap_or("");
+        let arg_keys: Vec<&str> = f["parameters"]["properties"]
+            .as_object()
+            .map(|o| o.keys().map(|k| k.as_str()).collect())
+            .unwrap_or_default();
+        if arg_keys.is_empty() {
+            lines.push(format!("- {name}() — {desc}"));
+        } else {
+            lines.push(format!("- {name}(args: {}) — {desc}", arg_keys.join(", ")));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Flatten an OpenAI-style message array into a plain-text transcript for the
+/// CLI backend. Roles map to readable headers; non-string content is skipped.
+fn render_conversation_for_text(messages: &[serde_json::Value]) -> String {
+    let mut out = String::new();
+    for m in messages {
+        let role = m["role"].as_str().unwrap_or("user");
+        let content = m["content"].as_str().unwrap_or("");
+        if content.is_empty() {
+            continue;
+        }
+        let label = match role {
+            "assistant" => "ASSISTANT",
+            "tool" => "TOOL RESULT",
+            "system" => "SYSTEM",
+            _ => "USER",
+        };
+        out.push_str(&format!("## {label}\n{content}\n\n"));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1374,5 +1641,123 @@ mod tests {
             !p.contains("CANONICAL"),
             "CANONICAL header should be absent when context is empty:\n{p}"
         );
+    }
+
+    // ── Claude Code CLI provider ──────────────────────────────────────────────
+
+    #[test]
+    fn claude_provider_needs_no_api_key() {
+        // The CLI uses the machine's own login, so no RUSTYFI_LLM_API_KEY.
+        let p = Provider::build(Some("claude_cli".to_string()), None, None).unwrap();
+        assert!(
+            matches!(p, Provider::ClaudeCli { .. }),
+            "claude_cli should select the ClaudeCli provider without a key"
+        );
+        // Aliases all resolve to the same provider.
+        for alias in ["claude", "claude-cli", "claudecode", "claude-code"] {
+            let p = Provider::build(Some(alias.to_string()), None, None).unwrap();
+            assert!(
+                matches!(p, Provider::ClaudeCli { .. }),
+                "alias {alias} failed"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_command_args_are_well_formed() {
+        let args = claude_command_args("opus", "be terse");
+        assert_eq!(args[0], "-p");
+        // Print mode with JSON output and an explicit model + replaced system prompt.
+        assert!(args.iter().any(|a| a == "--output-format"));
+        let oi = args.iter().position(|a| a == "--output-format").unwrap();
+        assert_eq!(args[oi + 1], "json");
+        let mi = args.iter().position(|a| a == "--model").unwrap();
+        assert_eq!(args[mi + 1], "opus");
+        let si = args.iter().position(|a| a == "--system-prompt").unwrap();
+        assert_eq!(args[si + 1], "be terse");
+        assert!(args.iter().any(|a| a == "--no-session-persistence"));
+    }
+
+    #[test]
+    fn parse_claude_result_extracts_text_from_real_envelope() {
+        // A real success envelope captured from `claude -p --output-format json`.
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false,"result":"fn main() {}","session_id":"abc","total_cost_usd":0.01,"usage":{}}"#;
+        assert_eq!(parse_claude_result(stdout).unwrap(), "fn main() {}");
+    }
+
+    #[test]
+    fn parse_claude_result_maps_401_to_config_error() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":401,"result":"Invalid API key · Fix external API key"}"#;
+        match parse_claude_result(stdout) {
+            Err(EngineError::Config(msg)) => {
+                assert!(msg.contains("auth failed"), "msg: {msg}");
+                assert!(
+                    msg.contains("ANTHROPIC_API_KEY"),
+                    "should explain the key fix: {msg}"
+                );
+            }
+            other => panic!("expected Config error for 401, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_claude_result_maps_other_error_to_llm_error() {
+        let stdout =
+            r#"{"type":"result","is_error":true,"api_error_status":529,"result":"overloaded"}"#;
+        assert!(matches!(
+            parse_claude_result(stdout),
+            Err(EngineError::Llm(_))
+        ));
+    }
+
+    #[test]
+    fn parse_claude_result_tolerates_leading_warning_line() {
+        let stdout = "warning: something noisy\n{\"is_error\":false,\"result\":\"ok\"}";
+        assert_eq!(parse_claude_result(stdout).unwrap(), "ok");
+    }
+
+    #[test]
+    fn parse_claude_result_rejects_empty_result() {
+        let stdout = r#"{"is_error":false,"result":""}"#;
+        assert!(matches!(
+            parse_claude_result(stdout),
+            Err(EngineError::Llm(_))
+        ));
+    }
+
+    #[test]
+    fn render_tools_lists_names_and_args() {
+        let tools = json!([
+            {"type":"function","function":{"name":"cargo_check","description":"run check","parameters":{"type":"object","properties":{}}}},
+            {"type":"function","function":{"name":"write_file","description":"write","parameters":{"type":"object","properties":{"path":{},"content":{}}}}}
+        ]);
+        let rendered = render_tools_for_text(&tools);
+        assert!(rendered.contains("cargo_check()"), "{rendered}");
+        // Key order is serde_json's (alphabetical) — assert membership, not order.
+        let write_line = rendered
+            .lines()
+            .find(|l| l.starts_with("- write_file(args:"))
+            .unwrap_or_else(|| panic!("no write_file line: {rendered}"));
+        assert!(write_line.contains("path"), "{write_line}");
+        assert!(write_line.contains("content"), "{write_line}");
+    }
+
+    #[test]
+    fn render_conversation_labels_roles_and_skips_empty() {
+        let messages = vec![
+            json!({"role":"user","content":"seed errors"}),
+            json!({"role":"assistant","content":"{\"tool\":\"cargo_check\"}"}),
+            json!({"role":"user","content":"tool result:\nerror count: 0"}),
+            json!({"role":"assistant","content":null}),
+        ];
+        let t = render_conversation_for_text(&messages);
+        assert!(t.contains("## USER\nseed errors"), "{t}");
+        assert!(
+            t.contains("## ASSISTANT\n{\"tool\":\"cargo_check\"}"),
+            "{t}"
+        );
+        assert!(t.contains("## USER\ntool result:"), "{t}");
+        // Null content is skipped, not rendered as an empty assistant block.
+        assert_eq!(t.matches("## ASSISTANT").count(), 1, "{t}");
     }
 }

@@ -387,7 +387,8 @@ fn preflight_env() -> Result<(), String> {
     let provider = std::env::var("RUSTYFI_PROVIDER")
         .unwrap_or_default()
         .to_lowercase();
-    if provider == "grok" || provider == "xai" {
+    if provider == "grok" || provider == "xai" || provider.starts_with("claude") {
+        // grok/xai use OAuth; claude* uses the local Claude Code login — no key.
         return Ok(());
     }
     let has_key = std::env::var("RUSTYFI_LLM_API_KEY")

@@ -2942,11 +2942,13 @@ fn tier_for_tokens(tokens: usize, tier_fast: usize, tier_mid: usize) -> Option<S
     // LlmClient use whatever model was configured (grok-build by default).
     // Tiering only makes sense on OpenRouter where flash-lite/flash/flash-2.5
     // are all available.
-    let is_grok = matches!(
-        std::env::var("RUSTYFI_PROVIDER").as_deref(),
-        Ok("grok") | Ok("xai")
-    );
-    if is_grok {
+    // Tiering swaps in OpenRouter-specific model aliases, which only make sense
+    // on that endpoint. Grok and the local Claude Code CLI expose their own
+    // models, so skip tiering and let the configured model stand.
+    let provider = std::env::var("RUSTYFI_PROVIDER")
+        .unwrap_or_default()
+        .to_lowercase();
+    if matches!(provider.as_str(), "grok" | "xai") || provider.starts_with("claude") {
         return None;
     }
 

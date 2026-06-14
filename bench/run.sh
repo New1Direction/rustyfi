@@ -13,10 +13,20 @@ WORK="$BENCH/.work"
 RESULTS="$WORK/results"
 ONLY="${1:-}"
 
+# The gate: set RUSTYFI_BENCH_DEEP=1 to engage the agentic --deep doctor on
+# residual errors. Pair with a strong fix model, e.g. the local Claude Code CLI
+# at no extra cost:  RUSTYFI_FIX_PROVIDER=claude_cli RUSTYFI_FIX_MODEL=opus
+DEEP=""
+[ -n "${RUSTYFI_BENCH_DEEP:-}" ] && DEEP="--deep"
+
 say() { printf '\033[1;33m[bench]\033[0m %s\n' "$1" >&2; }
 
 [ "$ONLY" = "--aggregate-only" ] || {
-  [ -n "${RUSTYFI_LLM_API_KEY:-}" ] || { say "RUSTYFI_LLM_API_KEY not set"; exit 2; }
+  # Translation needs an API key unless it too runs through the Claude Code CLI.
+  case "${RUSTYFI_PROVIDER:-}" in
+    claude*) ;;
+    *) [ -n "${RUSTYFI_LLM_API_KEY:-}" ] || { say "RUSTYFI_LLM_API_KEY not set"; exit 2; } ;;
+  esac
   command -v python3 >/dev/null 2>&1 || { say "python3 is required"; exit 2; }
   python3 -c 'import tomllib' 2>/dev/null || python3 -c 'import tomli' 2>/dev/null \
     || { say "python3 needs tomllib (3.11+) or: pip install tomli"; exit 2; }
@@ -56,7 +66,7 @@ EOF
     fi
     out="$WORK/out/$name"
     rm -rf "$out"
-    if "$ROOT/target/release/rustyfi" "$src" -o "$out" --fresh --json \
+    if "$ROOT/target/release/rustyfi" "$src" -o "$out" --fresh --json $DEEP \
         > "$RESULTS/$name.json" 2> "$RESULTS/$name.log"; then
       say "$name: clean"
     else
