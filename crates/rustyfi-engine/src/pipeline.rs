@@ -1610,6 +1610,48 @@ where
         }
     }
 
+    // ── Compiler-guided derive insertion (verified) ─────────────────────
+    // Translated structs/enums routinely lack the derives they need; each
+    // E0277 names the exact (type, trait). Add the derive deterministically,
+    // gated on the compiler — a derive that can't apply (e.g. a struct with a
+    // boxed-closure field) is reverted. Zero tokens, runs before the LLM loop.
+    if !deps_unresolved && current.exit_code != Some(0) {
+        let e0277: Vec<String> = parse_cargo_diagnostics(&current)
+            .unwrap_or_default()
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("E0277"))
+            .map(|d| d.message.clone())
+            .collect();
+        let want = crate::auto_derive::needed_derives(&e0277);
+        if !want.is_empty() {
+            if let Ok(snap) = snapshot_src(ws) {
+                let before = count_errors(&current);
+                let report = crate::auto_derive::add_missing_derives(ws, &want);
+                if report.derives_added > 0 {
+                    let rechecked = cargo_check_opt(ws);
+                    let after = rechecked.as_ref().map(count_errors);
+                    if after.is_some_and(|a| a < before) {
+                        emit(
+                            progress_cb,
+                            Progress::Note {
+                                message: format!(
+                                    "Added {} missing #[derive] across {} file(s) — \
+                                     {before} → {} errors (no AI needed).",
+                                    report.derives_added,
+                                    report.files_changed,
+                                    after.unwrap(),
+                                ),
+                            },
+                        );
+                        current = rechecked.unwrap_or(current);
+                    } else {
+                        let _ = restore_src(ws, &snap);
+                    }
+                }
+            }
+        }
+    }
+
     let mut exit_clean = current.exit_code == Some(0);
     let mut fix_cycles: Vec<FixCycleSummary> = vec![];
     // Diagnostics of the most recent check — refreshed every cycle so the LLM
