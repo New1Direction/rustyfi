@@ -1359,6 +1359,20 @@ where
                 .unwrap_or_default();
             let repaired =
                 crate::scaffold::repair_module_refs(&result.rust_code, &this_pkg, package_map);
+            // Parse-gate: never write a file that is not valid Rust. A truncated
+            // or over-stripped translation leaves a dangling fragment (e.g. a
+            // function body with no signature) that can never compile AND, being
+            // a parse error, suppresses every other file's diagnostics — so the
+            // crate's whole error count becomes a deceptive undercount. Contain
+            // it as a valid, flagged stub instead; the todo/stub count surfaces it.
+            let (repaired, stubbed) = parse_gate(repaired, rel);
+            if stubbed && !result.is_stub {
+                stub_count += 1;
+                warn!(
+                    "translation for {} did not parse — wrote a stub",
+                    rel.display()
+                );
+            }
             let extra_deps = extract_dep_hints(&repaired);
             let dest = scaffolder.write_module(rel, &repaired, &extra_deps, package_map)?;
 
@@ -2806,6 +2820,24 @@ fn cargo_check_opt(workspace: &Path) -> Option<CargoOutput> {
     }
 }
 
+/// Replace a translation that does not parse as a Rust file with a valid,
+/// clearly-flagged stub. A truncated or over-stripped model response leaves a
+/// dangling fragment that can never compile and that suppresses the rest of the
+/// crate's diagnostics; a stub parses, compiles, and is surfaced as a TODO.
+/// Returns `(code_to_write, was_stubbed)`.
+fn parse_gate(code: String, rel: &Path) -> (String, bool) {
+    if syn::parse_file(&code).is_ok() {
+        return (code, false);
+    }
+    let stub = format!(
+        "// TODO: rustyfi could not produce valid Rust for `{}` — the model \
+         returned truncated or invalid output. This module needs a manual port \
+         (or a re-translation pass).\n",
+        rel.display()
+    );
+    (stub, true)
+}
+
 /// Count `>= Error` diagnostics in a cargo-check result — the metric the
 /// deterministic passes gate on (a rewrite is kept only if this strictly drops).
 fn count_errors(output: &CargoOutput) -> usize {
@@ -3369,6 +3401,25 @@ rstest = "0.18"
             !bad.contains(&"axios".to_string()),
             "harvested wrong name: {bad:?}"
         );
+    }
+
+    #[test]
+    fn parse_gate_stubs_unparseable_fragment() {
+        // A dangling function body (no `fn`/signature) — the exact truncation
+        // artifact that was poisoning crates and undercounting their errors.
+        let fragment = "timeout(d, self.fetch(req)).await.map_err(|_| Box::new(E))?".to_string();
+        let (out, stubbed) = parse_gate(fragment, std::path::Path::new("src/core/mod.rs"));
+        assert!(stubbed, "a dangling fragment must be stubbed");
+        assert!(
+            syn::parse_file(&out).is_ok(),
+            "the replacement stub must itself be valid Rust:\n{out}"
+        );
+
+        // Valid Rust passes through untouched.
+        let good = "pub fn f() -> i32 { 1 }".to_string();
+        let (out2, stubbed2) = parse_gate(good.clone(), std::path::Path::new("src/x.rs"));
+        assert!(!stubbed2);
+        assert_eq!(out2, good);
     }
 
     #[test]
