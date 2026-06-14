@@ -336,6 +336,23 @@ pub struct LlmClient {
     timeout_secs: u64,
 }
 
+/// Default per-request timeout (seconds) before any env override.
+///
+/// HTTP providers return the first token quickly, so `http_default` (90s
+/// translate / 180s fix) is fine. The Claude Code CLI is different: it spawns a
+/// subprocess (cold start) and drives a reasoning model, which routinely needs
+/// minutes — a 162-error doctor seed blew the 180s fix default on the *first*
+/// call, and Opus translation runs ~180s/call. Give the CLI provider a roomier
+/// default; `RUSTYFI_LLM_TIMEOUT` / `RUSTYFI_FIX_TIMEOUT` still override it.
+fn default_timeout_for(provider: &Provider, http_default: u64) -> u64 {
+    const CLAUDE_CLI_DEFAULT: u64 = 600;
+    if matches!(provider, Provider::ClaudeCli { .. }) {
+        CLAUDE_CLI_DEFAULT
+    } else {
+        http_default
+    }
+}
+
 impl LlmClient {
     /// Translation client — the `RUSTYFI_*` vars.
     ///
@@ -346,12 +363,13 @@ impl LlmClient {
     /// | `RUSTYFI_LLM_BASE_URL` | `https://openrouter.ai/api/v1` | OpenAI compat endpoint |
     /// | `RUSTYFI_LLM_MODEL` | `google/gemini-2.5-flash` / `grok-build` | Model ID |
     pub fn from_env() -> Result<Self, EngineError> {
+        let provider = Provider::from_env()?;
         let timeout = std::env::var("RUSTYFI_LLM_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(90);
+            .unwrap_or_else(|| default_timeout_for(&provider, 90));
         Self::build(
-            Provider::from_env()?,
+            provider,
             std::env::var("RUSTYFI_LLM_MODEL")
                 .ok()
                 .filter(|s| !s.trim().is_empty()),
@@ -366,12 +384,13 @@ impl LlmClient {
     /// to point at a different endpoint entirely, e.g. Anthropic or OpenAI).
     /// Everything falls back to the translation config, so unset == no change.
     pub fn for_fixing() -> Result<Self, EngineError> {
+        let provider = Provider::from_fix_env()?;
         let timeout = std::env::var("RUSTYFI_FIX_TIMEOUT")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(180); // reasoning models think longer
+            .unwrap_or_else(|| default_timeout_for(&provider, 180)); // reasoning models think longer
         Self::build(
-            Provider::from_fix_env()?,
+            provider,
             env_or("RUSTYFI_FIX_MODEL", "RUSTYFI_LLM_MODEL"),
             timeout,
         )
@@ -1337,6 +1356,21 @@ fn urlenccode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Provider-aware default timeout ────────────────────────────────────────
+
+    #[test]
+    fn claude_cli_gets_a_roomier_default_timeout() {
+        let cli = Provider::ClaudeCli {
+            bin: "claude".to_string(),
+        };
+        // The CLI provider ignores the HTTP default and uses its own roomier one.
+        assert_eq!(default_timeout_for(&cli, 90), 600);
+        assert_eq!(default_timeout_for(&cli, 180), 600);
+        // HTTP providers keep the caller's default unchanged.
+        assert_eq!(default_timeout_for(&Provider::Grok, 90), 90);
+        assert_eq!(default_timeout_for(&Provider::Grok, 180), 180);
+    }
 
     // ── Tool-calling request body ─────────────────────────────────────────────
 
