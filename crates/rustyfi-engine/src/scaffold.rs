@@ -735,7 +735,7 @@ tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
                 continue;
             }
             warn!("Adding dep from LLM hint: {krate} = \"{ver}\"");
-            content.push_str(&format!("{krate} = \"{ver}\"\n"));
+            content = insert_dep_line(&content, &format!("{krate} = \"{ver}\""));
         }
 
         fs::write(&path, content).map_err(|e| EngineError::Io(e.to_string()))?;
@@ -803,8 +803,7 @@ tracing-subscriber = {{ version = "0.3", features = ["env-filter"] }}
                 "Adding missing dep from registry: {} = \"{}\"",
                 spec.krate, spec.version
             );
-            content.push_str(&render_dep_line(spec));
-            content.push('\n');
+            content = insert_dep_line(&content, &render_dep_line(spec));
         }
         fs::write(&path, content).map_err(|e| EngineError::Io(e.to_string()))?;
         Ok(())
@@ -858,6 +857,44 @@ fn remove_self_leaf(line: &str) -> Option<String> {
         kept.join(", "),
         &line[close + 1..]
     ))
+}
+
+/// Insert a dependency line into the `[dependencies]` section.
+///
+/// The scaffolded `Cargo.toml` ends with a `[workspace]` table (to opt out of
+/// any enclosing workspace). Appending a dep to EOF therefore lands it *after*
+/// `[workspace]`, where cargo parses it as a workspace key and silently ignores
+/// it — the dependency never takes effect and its symbols stay unresolved
+/// (a storm of E0432/E0433). Insert just below the `[dependencies]` header
+/// instead. Falls back to an EOF append only when there is no such section.
+fn insert_dep_line(content: &str, dep_line: &str) -> String {
+    const HDR: &str = "[dependencies]";
+    match content.find(HDR) {
+        Some(pos) => {
+            // Splice in immediately after the header line so the dep is
+            // unambiguously inside `[dependencies]`, before any later section.
+            let after_hdr = pos + HDR.len();
+            let line_end = content[after_hdr..]
+                .find('\n')
+                .map(|i| after_hdr + i + 1)
+                .unwrap_or(content.len());
+            let mut out = String::with_capacity(content.len() + dep_line.len() + 1);
+            out.push_str(&content[..line_end]);
+            out.push_str(dep_line);
+            out.push('\n');
+            out.push_str(&content[line_end..]);
+            out
+        }
+        None => {
+            let mut out = content.to_string();
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(dep_line);
+            out.push('\n');
+            out
+        }
+    }
 }
 
 /// Render a registry crate as a Cargo.toml dependency line.
@@ -1008,6 +1045,37 @@ mod tests {
 
     fn p(s: &str) -> PathBuf {
         PathBuf::from(s)
+    }
+
+    #[test]
+    fn insert_dep_line_lands_in_dependencies_not_after_workspace() {
+        // The scaffold template: [dependencies] above, [workspace] last.
+        let cargo = "[package]\nname = \"x\"\nedition = \"2021\"\n\n\
+                     [dependencies]\nserde = \"1\"\n\n\
+                     # empty table\n[workspace]\n";
+        let out = insert_dep_line(cargo, "regex = \"1\"");
+
+        let deps = out.find("[dependencies]").unwrap();
+        let dep = out.find("regex = \"1\"").unwrap();
+        let ws = out.find("[workspace]").unwrap();
+        // The new dep must sit inside [dependencies], strictly before [workspace]
+        // — appending to EOF (the old bug) would place it after [workspace],
+        // where cargo ignores it.
+        assert!(
+            deps < dep && dep < ws,
+            "dep must be inside [dependencies], got:\n{out}"
+        );
+        // No section header may appear between [dependencies] and the new dep.
+        assert!(
+            !out[deps + "[dependencies]".len()..dep].contains('['),
+            "a section boundary leaked between the header and the dep:\n{out}"
+        );
+    }
+
+    #[test]
+    fn insert_dep_line_appends_when_no_dependencies_section() {
+        let out = insert_dep_line("[package]\nname = \"x\"\n", "regex = \"1\"");
+        assert!(out.contains("regex = \"1\""), "{out}");
     }
 
     fn go_map() -> PackageMap {
@@ -1293,6 +1361,39 @@ mod tests {
         );
 
         // Cleanup
+        fs::remove_dir_all(&temp_dir).unwrap();
+    }
+
+    #[test]
+    fn registry_dep_is_written_inside_dependencies_not_after_workspace() {
+        let temp_dir = std::env::temp_dir().join("rustyfi_test_regdep");
+        if temp_dir.exists() {
+            fs::remove_dir_all(&temp_dir).unwrap();
+        }
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let scaffolder = Scaffolder::new(temp_dir.clone(), "test_crate".to_string());
+        scaffolder.scaffold().unwrap();
+
+        // Add a real registry crate exactly the way the pipeline does.
+        let spec = crate::deps::REGISTRY
+            .iter()
+            .find(|s| s.krate == "regex")
+            .expect("regex is in the curated registry");
+        scaffolder.add_registry_deps(&[spec]).unwrap();
+
+        let content = fs::read_to_string(temp_dir.join("Cargo.toml")).unwrap();
+        let deps = content.find("[dependencies]").unwrap();
+        let dep = content.find("regex").expect("regex dep should be written");
+        let ws = content.find("[workspace]").unwrap();
+        // Regression guard: the dep must land inside [dependencies], strictly
+        // before [workspace]. Appending to EOF (the old bug) put it after
+        // [workspace], where cargo silently ignored it → unresolved-import storm.
+        assert!(
+            deps < dep && dep < ws,
+            "registry dep must be inside [dependencies], not after [workspace]:\n{content}"
+        );
+
         fs::remove_dir_all(&temp_dir).unwrap();
     }
 }

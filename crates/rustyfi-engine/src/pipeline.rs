@@ -1359,6 +1359,20 @@ where
                 .unwrap_or_default();
             let repaired =
                 crate::scaffold::repair_module_refs(&result.rust_code, &this_pkg, package_map);
+            // Parse-gate: never write a file that is not valid Rust. A truncated
+            // or over-stripped translation leaves a dangling fragment (e.g. a
+            // function body with no signature) that can never compile AND, being
+            // a parse error, suppresses every other file's diagnostics — so the
+            // crate's whole error count becomes a deceptive undercount. Contain
+            // it as a valid, flagged stub instead; the todo/stub count surfaces it.
+            let (repaired, stubbed) = parse_gate(repaired, rel);
+            if stubbed && !result.is_stub {
+                stub_count += 1;
+                warn!(
+                    "translation for {} did not parse — wrote a stub",
+                    rel.display()
+                );
+            }
             let extra_deps = extract_dep_hints(&repaired);
             let dest = scaffolder.write_module(rel, &repaired, &extra_deps, package_map)?;
 
@@ -1498,7 +1512,11 @@ where
     // deps that cargo itself names, until the dependency graph builds and the
     // *real* compile errors become visible.
     let mut stripped_deps: Vec<String> = Vec::new();
-    for _ in 0..8 {
+    // cargo resolution fails fast — it names one unresolvable dep per check — so
+    // a crate whose translation hallucinated N bad deps needs N passes. Real
+    // outputs hallucinate freely (axios alone produced ~7 npm-named deps), so
+    // keep the ceiling generous; the loop exits early once resolution succeeds.
+    for _ in 0..24 {
         if current.exit_code == Some(0) {
             break;
         }
@@ -1529,6 +1547,48 @@ where
     }
     let deps_unresolved = !unresolvable_deps(&current).is_empty();
 
+    // ── Deterministic import resolution (compiler-verified) ──────────────
+    // Translation flattens source namespaces into flat `src/<module>` modules,
+    // but the model emits imports against the *source* paths — a storm of
+    // E0432/E0433. Re-point each `use crate::…::Sym` at the module that
+    // actually defines `Sym`. Runs before rustfix and the LLM loop so these
+    // errors never cost a token.
+    //
+    // The rewrite is NOT trusted blindly: expanding a `use {..}` group can
+    // multiply one unresolved-group error into several per-leaf errors, and a
+    // target module may not be wired into the crate root. So the pass is gated
+    // on the compiler — snapshot, apply, re-check, and KEEP only if the error
+    // count strictly drops, else revert. It can help or no-op, never regress.
+    // (If we can't snapshot, skip the pass rather than risk an irreversible
+    // regression.)
+    if !deps_unresolved && current.exit_code != Some(0) {
+        if let Ok(snap) = snapshot_src(ws) {
+            let errors_before = count_errors(&current);
+            let report = crate::resolve_imports::resolve_crate_imports(ws);
+            if report.files_changed > 0 {
+                let rechecked = cargo_check_opt(ws);
+                let errors_after = rechecked.as_ref().map(count_errors);
+                if errors_after.is_some_and(|after| after < errors_before) {
+                    let after = errors_after.unwrap();
+                    emit(
+                        progress_cb,
+                        Progress::Note {
+                            message: format!(
+                                "Re-pointed cross-module imports in {} file(s) — \
+                                 {errors_before} → {after} errors (no AI needed).",
+                                report.files_changed,
+                            ),
+                        },
+                    );
+                    current = rechecked.unwrap_or(current);
+                } else {
+                    // The compiler is the oracle: this rewrite didn't help. Revert.
+                    let _ = restore_src(ws, &snap);
+                }
+            }
+        }
+    }
+
     // ── Deterministic rustfix pass ───────────────────────────────────────
     // Apply rustc's own machine-applicable suggestions (similar-name fns,
     // arg-count fixes, missing `&`/derives) before spending any LLM tokens.
@@ -1547,6 +1607,48 @@ where
                 },
             );
             current = cargo_check_opt(ws).unwrap_or(current);
+        }
+    }
+
+    // ── Compiler-guided derive insertion (verified) ─────────────────────
+    // Translated structs/enums routinely lack the derives they need; each
+    // E0277 names the exact (type, trait). Add the derive deterministically,
+    // gated on the compiler — a derive that can't apply (e.g. a struct with a
+    // boxed-closure field) is reverted. Zero tokens, runs before the LLM loop.
+    if !deps_unresolved && current.exit_code != Some(0) {
+        let e0277: Vec<String> = parse_cargo_diagnostics(&current)
+            .unwrap_or_default()
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("E0277"))
+            .map(|d| d.message.clone())
+            .collect();
+        let want = crate::auto_derive::needed_derives(&e0277);
+        if !want.is_empty() {
+            if let Ok(snap) = snapshot_src(ws) {
+                let before = count_errors(&current);
+                let report = crate::auto_derive::add_missing_derives(ws, &want);
+                if report.derives_added > 0 {
+                    let rechecked = cargo_check_opt(ws);
+                    let after = rechecked.as_ref().map(count_errors);
+                    if after.is_some_and(|a| a < before) {
+                        emit(
+                            progress_cb,
+                            Progress::Note {
+                                message: format!(
+                                    "Added {} missing #[derive] across {} file(s) — \
+                                     {before} → {} errors (no AI needed).",
+                                    report.derives_added,
+                                    report.files_changed,
+                                    after.unwrap(),
+                                ),
+                            },
+                        );
+                        current = rechecked.unwrap_or(current);
+                    } else {
+                        let _ = restore_src(ws, &snap);
+                    }
+                }
+            }
         }
     }
 
@@ -1617,7 +1719,19 @@ where
                             // model) can re-introduce duplicate definitions/uses
                             // that the translation-time dedup would have caught.
                             let fixed = crate::scaffold::normalize_module_content(&repaired);
-                            let _ = fs::write(path, fixed);
+                            // Never overwrite a file with output that does not
+                            // parse — a truncated fix response would replace a
+                            // flawed-but-parseable file with a fragment that can
+                            // never compile and that suppresses every other
+                            // file's diagnostics. Keep the previous version.
+                            if syn::parse_file(&fixed).is_ok() {
+                                let _ = fs::write(path, fixed);
+                            } else {
+                                warn!(
+                                    "fix-loop output for {} did not parse — keeping the previous version",
+                                    path.display()
+                                );
+                            }
                         }
                         Err(EngineError::Config(msg)) => {
                             // Auth died mid-verify — stop here, the crate is
@@ -1948,9 +2062,14 @@ pub fn restore_src(ws: &Path, snap: &TempDir) -> Result<(), EngineError> {
 
 /// Extract crate names that `cargo` could not resolve from a failed check.
 /// These errors live in **stderr** (resolution happens before compilation, so
-/// there are no JSON compiler-messages for them):
+/// there are no JSON compiler-messages for them). Two formats matter:
 ///   error: failed to select a version for the requirement `badger = "^4.0.0"`
-///   error: no matching package named `foo` found
+///   error: no matching package named `foo` found        (older cargo)
+/// and the current multi-line form, where the name is on a *separate* line:
+///   error: no matching package found
+///   searched package name: `fs-extra`
+/// so we must also harvest names from the `searched package name:` line — the
+/// error-phrase line itself carries no backtick name there.
 fn unresolvable_deps(output: &CargoOutput) -> Vec<String> {
     use std::collections::BTreeSet;
     let mut names = BTreeSet::new();
@@ -1960,7 +2079,11 @@ fn unresolvable_deps(output: &CargoOutput) -> Vec<String> {
             || l.contains("no matching package")
             || l.contains("failed to load source for dependency")
             || (l.contains("failed to get") && l.contains("dependency"));
-        if !is_resolution_err {
+        // The name-bearing line in the current multi-line "no matching package"
+        // diagnostic. (Must NOT match "location searched: …" or "required by
+        // package `axios …`", which would harvest the wrong name.)
+        let is_name_line = l.contains("searched package name");
+        if !is_resolution_err && !is_name_line {
             continue;
         }
         if let Some(inner) = between_backticks(line) {
@@ -2751,6 +2874,34 @@ fn cargo_check_opt(workspace: &Path) -> Option<CargoOutput> {
     }
 }
 
+/// Replace a translation that does not parse as a Rust file with a valid,
+/// clearly-flagged stub. A truncated or over-stripped model response leaves a
+/// dangling fragment that can never compile and that suppresses the rest of the
+/// crate's diagnostics; a stub parses, compiles, and is surfaced as a TODO.
+/// Returns `(code_to_write, was_stubbed)`.
+fn parse_gate(code: String, rel: &Path) -> (String, bool) {
+    if syn::parse_file(&code).is_ok() {
+        return (code, false);
+    }
+    let stub = format!(
+        "// TODO: rustyfi could not produce valid Rust for `{}` — the model \
+         returned truncated or invalid output. This module needs a manual port \
+         (or a re-translation pass).\n",
+        rel.display()
+    );
+    (stub, true)
+}
+
+/// Count `>= Error` diagnostics in a cargo-check result — the metric the
+/// deterministic passes gate on (a rewrite is kept only if this strictly drops).
+fn count_errors(output: &CargoOutput) -> usize {
+    parse_cargo_diagnostics(output)
+        .unwrap_or_default()
+        .iter()
+        .filter(|d| d.level >= rustyfi_core::state::DiagnosticLevel::Error)
+        .count()
+}
+
 /// Classify error-level diagnostics into deduplicated, priority-ranked
 /// family/hint pairs.
 fn classify_and_rank<'a>(
@@ -2942,11 +3093,13 @@ fn tier_for_tokens(tokens: usize, tier_fast: usize, tier_mid: usize) -> Option<S
     // LlmClient use whatever model was configured (grok-build by default).
     // Tiering only makes sense on OpenRouter where flash-lite/flash/flash-2.5
     // are all available.
-    let is_grok = matches!(
-        std::env::var("RUSTYFI_PROVIDER").as_deref(),
-        Ok("grok") | Ok("xai")
-    );
-    if is_grok {
+    // Tiering swaps in OpenRouter-specific model aliases, which only make sense
+    // on that endpoint. Grok and the local Claude Code CLI expose their own
+    // models, so skip tiering and let the configured model stand.
+    let provider = std::env::var("RUSTYFI_PROVIDER")
+        .unwrap_or_default()
+        .to_lowercase();
+    if matches!(provider.as_str(), "grok" | "xai") || provider.starts_with("claude") {
         return None;
     }
 
@@ -3277,6 +3430,50 @@ rstest = "0.18"
             exit_code: Some(101),
         };
         assert!(unresolvable_deps(&compile).is_empty());
+    }
+
+    #[test]
+    fn unresolvable_deps_handles_current_multiline_format() {
+        // cargo 1.95 splits the diagnostic: the error phrase and the package
+        // name are on different lines. The name must come from the
+        // `searched package name:` line, NOT from `required by package`.
+        let out = CargoOutput {
+            stdout_lines: vec![],
+            stderr_lines: vec![
+                "    Updating crates.io index".into(),
+                "error: no matching package found".into(),
+                "searched package name: `fs-extra`".into(),
+                "location searched: crates.io index".into(),
+                "required by package `axios v0.1.0 (/tmp/axios)`".into(),
+            ],
+            exit_code: Some(101),
+        };
+        let bad = unresolvable_deps(&out);
+        assert!(bad.contains(&"fs-extra".to_string()), "got {bad:?}");
+        // The crate under repair must never be mistaken for an unresolvable dep.
+        assert!(
+            !bad.contains(&"axios".to_string()),
+            "harvested wrong name: {bad:?}"
+        );
+    }
+
+    #[test]
+    fn parse_gate_stubs_unparseable_fragment() {
+        // A dangling function body (no `fn`/signature) — the exact truncation
+        // artifact that was poisoning crates and undercounting their errors.
+        let fragment = "timeout(d, self.fetch(req)).await.map_err(|_| Box::new(E))?".to_string();
+        let (out, stubbed) = parse_gate(fragment, std::path::Path::new("src/core/mod.rs"));
+        assert!(stubbed, "a dangling fragment must be stubbed");
+        assert!(
+            syn::parse_file(&out).is_ok(),
+            "the replacement stub must itself be valid Rust:\n{out}"
+        );
+
+        // Valid Rust passes through untouched.
+        let good = "pub fn f() -> i32 { 1 }".to_string();
+        let (out2, stubbed2) = parse_gate(good.clone(), std::path::Path::new("src/x.rs"));
+        assert!(!stubbed2);
+        assert_eq!(out2, good);
     }
 
     #[test]

@@ -4,6 +4,70 @@ All notable changes to Rustyfi are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-06-14
+
+The release where the recipe first carried a **real foreign project all the way
+to a clean, building compile — fully automatically**: `ky` (a 52-file
+TypeScript HTTP client) translated to Rust that passes `cargo check` *and*
+`cargo build` with zero errors and no `todo!()` stubs. Getting there took a
+keyless translation backend, a stack of deterministic correctness passes that
+make the generated crate *structurally* sound before any model repair, and an
+agentic doctor that finally drives reliably over an HTTP fix model.
+
+This is the **floor** — a clean, building compile — not behavioral equivalence;
+for a library, sameness is still unverified.
+
+### Added
+- **Keyless Claude Code CLI provider** (`RUSTYFI_PROVIDER=claude_cli`, or
+  `RUSTYFI_FIX_PROVIDER=claude_cli`): drive translation through the local
+  `claude` CLI on your subscription, no API key. It strips `ANTHROPIC_API_KEY`
+  from the child so the CLI uses its own login. Best for **single-shot
+  translation** — see Notes on why it is *not* the right backend for the `--deep`
+  doctor loop.
+- **Deterministic cross-module import resolver**: re-points `use crate::…::Sym`
+  to the module that actually defines `Sym` (unambiguous-only, never deletes),
+  clearing namespace-flattening `E0432`/`E0433` storms for zero tokens. It is
+  **compiler-gated** — applied only if the error count strictly drops, otherwise
+  reverted — so it can never regress a crate.
+- **Compiler-guided auto-derive pass**: reads `E0277` diagnostics and adds the
+  missing `#[derive(...)]` for derivable std traits on simple local types, also
+  snapshot-revert gated.
+- `$0` measurement tooling: `dep_scan`, `doctor_crate`, and `resolve` engine
+  examples (measure the doctor / resolver on an existing crate, no translation
+  key needed).
+
+### Fixed
+- **Auto-added dependencies were silently ignored.** The generated `Cargo.toml`
+  ends with a `[workspace]` table, and both dependency writers appended to
+  end-of-file — so every added dependency landed *after* `[workspace]` and Cargo
+  parsed it as a workspace key. Dependencies now splice into `[dependencies]`.
+  This alone clears the dominant import/dep error class on dependency-heavy
+  crates.
+- **Dependency-strip parser** now reads Cargo's current multi-line
+  resolution-error format (`searched package name: \`X\``), so hallucinated
+  registry deps are actually removed instead of wedging resolution.
+- **No fragment ever reaches disk.** Every translated file is `syn`-parse-gated
+  before write; an unparseable result becomes a valid TODO stub instead of an
+  orphaned fragment that both blocks compilation and *suppresses* the rest of the
+  crate's error count.
+- **`extract_rust_code` no longer eats the file head**: a fenced code block
+  inside a doc comment is no longer mistaken for the outer code-block wrapper.
+- **The fix loop never overwrites a good file with unparseable model output.**
+- **The agentic doctor now works over native HTTP tool-calling**: it records only
+  the single tool call it answers per turn, fixing the `400 insufficient tool
+  messages` that previously broke multi-step repair over OpenAI-wire providers —
+  what lets a reliable HTTP fix model converge a crate end-to-end.
+- Roomier default timeout for the Claude CLI provider.
+
+### Notes
+- **Use an HTTP fix model for `--deep`.** The `claude_cli` provider is reliable
+  for single-shot translation but hangs unpredictably inside the doctor's
+  multi-step tool loop; the agentic doctor should be driven by an HTTP model via
+  `RUSTYFI_FIX_MODEL` / `RUSTYFI_FIX_PROVIDER`.
+- Honest metric: a clean compile is **binary** (`cargo check` exit 0). A syntax
+  error makes Cargo abort early and *under*-reports the true error count, so error
+  counts alone flatter a broken crate — exit code is ground truth.
+
 ## [0.3.0] — 2026-06-13
 
 The **second oracle**: `cargo check` proves the output is valid Rust; behavioral
@@ -71,6 +135,7 @@ fixture corpus (sameness on the cases exercised), not a proof of equivalence.
   `cargo check` as the oracle, dependency auto-repair, rustfix pass,
   module-naming/contract scaffolding, and honest `NEXT_STEPS.md` output.
 
+[0.4.0]: https://github.com/New1Direction/rustyfi/releases/tag/v0.4.0
 [0.3.0]: https://github.com/New1Direction/rustyfi/releases/tag/v0.3.0
 [0.2.0]: https://github.com/New1Direction/rustyfi/releases/tag/v0.2.0
 [0.1.0]: https://github.com/New1Direction/rustyfi/releases/tag/v0.1.0

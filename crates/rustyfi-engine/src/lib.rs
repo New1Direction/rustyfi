@@ -1,5 +1,6 @@
 pub mod agent_fix;
 pub mod analysis;
+pub mod auto_derive;
 pub mod behavior;
 pub mod checkpoint;
 pub mod chunker;
@@ -10,6 +11,7 @@ pub mod fix_context;
 pub mod graph;
 pub mod llm;
 pub mod pipeline;
+pub mod resolve_imports;
 pub mod rustfix;
 pub mod scaffold;
 pub mod slicer;

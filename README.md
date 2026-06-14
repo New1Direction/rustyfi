@@ -75,6 +75,31 @@ export RUSTYFI_FIX_MODEL="deepseek-reasoner"
 Multiple keys? Comma-separate them in `RUSTYFI_LLM_API_KEY` and Rustyfi
 round-robins across them. Prefer xAI Grok via OAuth? `export RUSTYFI_PROVIDER=grok`.
 
+**Already have Claude Code? Use it — no API key, no extra spend.** If the
+[`claude`](https://claude.com/claude-code) CLI is installed and signed in,
+Rustyfi can drive it as a model backend through your existing subscription.
+This is the cheapest way to point the precision work (the compile-fix loop and
+the `--deep` doctor) at a Claude-class model while keeping bulk translation on a
+cheap API model:
+
+```bash
+# Cheap API model for the voluminous translation pass…
+export RUSTYFI_LLM_API_KEY="your-api-key"
+export RUSTYFI_LLM_BASE_URL="https://api.deepseek.com"
+export RUSTYFI_LLM_MODEL="deepseek-chat"
+# …and your local Claude Code (Opus) for the compile-fix loop + doctor:
+export RUSTYFI_FIX_PROVIDER=claude_cli
+export RUSTYFI_FIX_MODEL=opus
+
+rustyfi ./myapp -o ./myapp-rust --deep
+```
+
+Set `RUSTYFI_PROVIDER=claude_cli` to route *everything* (translation included)
+through the CLI. The subprocess runs `claude -p` with `ANTHROPIC_API_KEY`
+removed from its environment so it uses your Claude Code login rather than a
+key; set `RUSTYFI_CLAUDE_KEEP_KEY=1` to keep the key, or `RUSTYFI_CLAUDE_BIN` to
+point at a non-default `claude` binary.
+
 ### 2. Translate — pick your interface
 
 **A — the CLI** (no server, no browser; scriptable and CI-friendly):
@@ -281,7 +306,9 @@ already know that we're throwing away?"*
 | `RUSTYFI_DEEP_FIX` | *(unset)* | Engage the agentic doctor on residual errors (the CLI's `--deep` sets this) |
 | `RUSTYFI_DEEP_FIX_BUDGET` | `40` | Max doctor tool calls before it stops |
 | `RUSTYFI_DEEP_FIX_TIMEOUT` | `1200` | Doctor wall-clock budget, seconds |
-| `RUSTYFI_PROVIDER` | `openai` | `grok` / `xai` to use Grok OAuth instead of an API key |
+| `RUSTYFI_PROVIDER` | `openai` | `grok`/`xai` for Grok OAuth, or `claude_cli` to drive the local Claude Code CLI (no API key) |
+| `RUSTYFI_CLAUDE_BIN` | `claude` | Path to the Claude Code binary when `*_PROVIDER=claude_cli` |
+| `RUSTYFI_CLAUDE_KEEP_KEY` | *(unset)* | Keep `ANTHROPIC_API_KEY` for the `claude` subprocess instead of using its own login |
 | `RUSTYFI_VERIFY_RETRIES` | `4` | Max compile-fix cycles |
 | `RUSTYFI_RPM` | `25` | Global requests-per-minute gate across all workers |
 | `RUSTYFI_PARALLEL` | `16` | Files translated concurrently |
