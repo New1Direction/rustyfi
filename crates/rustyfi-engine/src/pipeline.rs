@@ -1529,6 +1529,30 @@ where
     }
     let deps_unresolved = !unresolvable_deps(&current).is_empty();
 
+    // ── Deterministic import resolution ──────────────────────────────────
+    // Translation flattens source namespaces into flat `src/<module>` modules,
+    // but the model emits imports against the *source* paths — a storm of
+    // E0432/E0433. Re-point each `use crate::…::Sym` at the module that
+    // actually defines `Sym` (unambiguous-only, never deleting). Runs before
+    // rustfix so the crate's imports resolve before mechanical fixes apply,
+    // and before the LLM loop so these errors never cost a token.
+    if !deps_unresolved && current.exit_code != Some(0) {
+        let report = crate::resolve_imports::resolve_crate_imports(ws);
+        if report.files_changed > 0 {
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: format!(
+                        "Re-pointed cross-module imports in {} file(s) to the modules that \
+                     actually define them (no AI needed).",
+                        report.files_changed,
+                    ),
+                },
+            );
+            current = cargo_check_opt(ws).unwrap_or(current);
+        }
+    }
+
     // ── Deterministic rustfix pass ───────────────────────────────────────
     // Apply rustc's own machine-applicable suggestions (similar-name fns,
     // arg-count fixes, missing `&`/derives) before spending any LLM tokens.
