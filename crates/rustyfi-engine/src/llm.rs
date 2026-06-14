@@ -293,18 +293,28 @@ pub fn build_tools_request_body(
 fn parse_tools_response(
     val: serde_json::Value,
 ) -> Result<(AssistantTurn, serde_json::Value), EngineError> {
-    let message = val["choices"][0]["message"].clone();
+    let mut message = val["choices"][0]["message"].clone();
 
     // Determine the turn type from the message object.
-    let tool_calls = message.get("tool_calls");
-    let turn = match tool_calls {
+    let tool_calls = message.get("tool_calls").cloned();
+    let turn = match &tool_calls {
         Some(tc) if tc.is_array() && !tc.as_array().unwrap().is_empty() => {
-            let first = &tc[0];
+            let arr = tc.as_array().unwrap();
+            let first = arr[0].clone();
             let name = first["function"]["name"].as_str().unwrap_or("").to_string();
             let arguments_json = first["function"]["arguments"]
                 .as_str()
                 .unwrap_or("{}")
                 .to_string();
+            // The doctor answers ONE tool per turn. If the model emitted
+            // several tool_calls (parallel_tool_calls is requested off, but not
+            // all providers honor it), truncate the assistant message we record
+            // to just the one we'll answer — otherwise the next request is
+            // rejected: "an assistant message with 'tool_calls' must be followed
+            // by tool messages responding to each 'tool_call_id'".
+            if arr.len() > 1 {
+                message["tool_calls"] = serde_json::json!([first]);
+            }
             AssistantTurn::ToolInvocation {
                 name,
                 arguments_json,
@@ -1396,6 +1406,30 @@ mod tests {
         );
         // tools array present.
         assert!(body["tools"].is_array(), "tools must be an array");
+    }
+
+    #[test]
+    fn parse_tools_response_truncates_parallel_tool_calls() {
+        // A provider that ignores parallel_tool_calls=false and returns two
+        // tool_calls. The doctor answers one per turn, so the recorded
+        // assistant message must carry ONLY the answered call — else the next
+        // request 400s ("insufficient tool messages following tool_calls").
+        let resp = json!({"choices":[{"message":{
+            "role":"assistant",
+            "content": serde_json::Value::Null,
+            "tool_calls":[
+                {"id":"a","type":"function","function":{"name":"read_file","arguments":"{}"}},
+                {"id":"b","type":"function","function":{"name":"cargo_check","arguments":"{}"}}
+            ]
+        }}]});
+        let (turn, msg) = parse_tools_response(resp).unwrap();
+        match turn {
+            AssistantTurn::ToolInvocation { name, .. } => assert_eq!(name, "read_file"),
+            other => panic!("expected a tool invocation, got {other:?}"),
+        }
+        let calls = msg["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1, "must keep only the answered tool_call");
+        assert_eq!(calls[0]["id"], "a");
     }
 
     #[test]
