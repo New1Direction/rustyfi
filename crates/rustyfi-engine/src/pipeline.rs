@@ -1498,7 +1498,11 @@ where
     // deps that cargo itself names, until the dependency graph builds and the
     // *real* compile errors become visible.
     let mut stripped_deps: Vec<String> = Vec::new();
-    for _ in 0..8 {
+    // cargo resolution fails fast — it names one unresolvable dep per check — so
+    // a crate whose translation hallucinated N bad deps needs N passes. Real
+    // outputs hallucinate freely (axios alone produced ~7 npm-named deps), so
+    // keep the ceiling generous; the loop exits early once resolution succeeds.
+    for _ in 0..24 {
         if current.exit_code == Some(0) {
             break;
         }
@@ -1990,9 +1994,14 @@ pub fn restore_src(ws: &Path, snap: &TempDir) -> Result<(), EngineError> {
 
 /// Extract crate names that `cargo` could not resolve from a failed check.
 /// These errors live in **stderr** (resolution happens before compilation, so
-/// there are no JSON compiler-messages for them):
+/// there are no JSON compiler-messages for them). Two formats matter:
 ///   error: failed to select a version for the requirement `badger = "^4.0.0"`
-///   error: no matching package named `foo` found
+///   error: no matching package named `foo` found        (older cargo)
+/// and the current multi-line form, where the name is on a *separate* line:
+///   error: no matching package found
+///   searched package name: `fs-extra`
+/// so we must also harvest names from the `searched package name:` line — the
+/// error-phrase line itself carries no backtick name there.
 fn unresolvable_deps(output: &CargoOutput) -> Vec<String> {
     use std::collections::BTreeSet;
     let mut names = BTreeSet::new();
@@ -2002,7 +2011,11 @@ fn unresolvable_deps(output: &CargoOutput) -> Vec<String> {
             || l.contains("no matching package")
             || l.contains("failed to load source for dependency")
             || (l.contains("failed to get") && l.contains("dependency"));
-        if !is_resolution_err {
+        // The name-bearing line in the current multi-line "no matching package"
+        // diagnostic. (Must NOT match "location searched: …" or "required by
+        // package `axios …`", which would harvest the wrong name.)
+        let is_name_line = l.contains("searched package name");
+        if !is_resolution_err && !is_name_line {
             continue;
         }
         if let Some(inner) = between_backticks(line) {
@@ -3331,6 +3344,31 @@ rstest = "0.18"
             exit_code: Some(101),
         };
         assert!(unresolvable_deps(&compile).is_empty());
+    }
+
+    #[test]
+    fn unresolvable_deps_handles_current_multiline_format() {
+        // cargo 1.95 splits the diagnostic: the error phrase and the package
+        // name are on different lines. The name must come from the
+        // `searched package name:` line, NOT from `required by package`.
+        let out = CargoOutput {
+            stdout_lines: vec![],
+            stderr_lines: vec![
+                "    Updating crates.io index".into(),
+                "error: no matching package found".into(),
+                "searched package name: `fs-extra`".into(),
+                "location searched: crates.io index".into(),
+                "required by package `axios v0.1.0 (/tmp/axios)`".into(),
+            ],
+            exit_code: Some(101),
+        };
+        let bad = unresolvable_deps(&out);
+        assert!(bad.contains(&"fs-extra".to_string()), "got {bad:?}");
+        // The crate under repair must never be mistaken for an unresolvable dep.
+        assert!(
+            !bad.contains(&"axios".to_string()),
+            "harvested wrong name: {bad:?}"
+        );
     }
 
     #[test]
