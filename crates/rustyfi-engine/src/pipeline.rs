@@ -1529,27 +1529,45 @@ where
     }
     let deps_unresolved = !unresolvable_deps(&current).is_empty();
 
-    // ── Deterministic import resolution ──────────────────────────────────
+    // ── Deterministic import resolution (compiler-verified) ──────────────
     // Translation flattens source namespaces into flat `src/<module>` modules,
     // but the model emits imports against the *source* paths — a storm of
     // E0432/E0433. Re-point each `use crate::…::Sym` at the module that
-    // actually defines `Sym` (unambiguous-only, never deleting). Runs before
-    // rustfix so the crate's imports resolve before mechanical fixes apply,
-    // and before the LLM loop so these errors never cost a token.
+    // actually defines `Sym`. Runs before rustfix and the LLM loop so these
+    // errors never cost a token.
+    //
+    // The rewrite is NOT trusted blindly: expanding a `use {..}` group can
+    // multiply one unresolved-group error into several per-leaf errors, and a
+    // target module may not be wired into the crate root. So the pass is gated
+    // on the compiler — snapshot, apply, re-check, and KEEP only if the error
+    // count strictly drops, else revert. It can help or no-op, never regress.
+    // (If we can't snapshot, skip the pass rather than risk an irreversible
+    // regression.)
     if !deps_unresolved && current.exit_code != Some(0) {
-        let report = crate::resolve_imports::resolve_crate_imports(ws);
-        if report.files_changed > 0 {
-            emit(
-                progress_cb,
-                Progress::Note {
-                    message: format!(
-                        "Re-pointed cross-module imports in {} file(s) to the modules that \
-                     actually define them (no AI needed).",
-                        report.files_changed,
-                    ),
-                },
-            );
-            current = cargo_check_opt(ws).unwrap_or(current);
+        if let Ok(snap) = snapshot_src(ws) {
+            let errors_before = count_errors(&current);
+            let report = crate::resolve_imports::resolve_crate_imports(ws);
+            if report.files_changed > 0 {
+                let rechecked = cargo_check_opt(ws);
+                let errors_after = rechecked.as_ref().map(count_errors);
+                if errors_after.is_some_and(|after| after < errors_before) {
+                    let after = errors_after.unwrap();
+                    emit(
+                        progress_cb,
+                        Progress::Note {
+                            message: format!(
+                                "Re-pointed cross-module imports in {} file(s) — \
+                                 {errors_before} → {after} errors (no AI needed).",
+                                report.files_changed,
+                            ),
+                        },
+                    );
+                    current = rechecked.unwrap_or(current);
+                } else {
+                    // The compiler is the oracle: this rewrite didn't help. Revert.
+                    let _ = restore_src(ws, &snap);
+                }
+            }
         }
     }
 
@@ -2773,6 +2791,16 @@ fn cargo_check_opt(workspace: &Path) -> Option<CargoOutput> {
             None
         }
     }
+}
+
+/// Count `>= Error` diagnostics in a cargo-check result — the metric the
+/// deterministic passes gate on (a rewrite is kept only if this strictly drops).
+fn count_errors(output: &CargoOutput) -> usize {
+    parse_cargo_diagnostics(output)
+        .unwrap_or_default()
+        .iter()
+        .filter(|d| d.level >= rustyfi_core::state::DiagnosticLevel::Error)
+        .count()
 }
 
 /// Classify error-level diagnostics into deduplicated, priority-ranked

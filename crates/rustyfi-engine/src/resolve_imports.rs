@@ -13,13 +13,18 @@
 //!
 //! The fix is one rule: **resolve a `use crate::…::Sym` to the module that
 //! actually defines `Sym`**, ignoring the model's (broken) path. A syn-built
-//! symbol→module index makes this exact. It is compiler-safe by construction:
-//! it only rewrites when the target module is *unambiguous* (exactly one module
-//! defines the symbol), never deletes an import, and is idempotent — a path
-//! that already points at the right module is left untouched.
+//! symbol→module index makes this targeted: it only rewrites when exactly one
+//! module defines the symbol, never deletes an import, and is idempotent — a
+//! path that already points at the right module is left untouched.
 //!
-//! Runs as a deterministic pass before the LLM fix loop, alongside `rustfix`
-//! and dependency repair.
+//! This is NOT safe by construction, though: expanding a `use {a, b, c}` group
+//! into per-leaf lines turns one unresolved-group error into several when some
+//! leaves still don't resolve, and a unique symbol's home module may not be
+//! wired into the crate root. So the pass is **gated on the compiler** by its
+//! caller — applied against a snapshot, re-checked, and kept only when the
+//! error count strictly drops, else reverted (see `phase_verify`). It runs as a
+//! deterministic pass before the LLM fix loop, alongside `rustfix` and
+//! dependency repair.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
