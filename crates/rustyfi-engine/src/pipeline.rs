@@ -2363,20 +2363,25 @@ fn phase_behavior<F: FnMut(Progress)>(
     if !config.verify_behavior {
         return skip("behavior verification not enabled");
     }
-    let source = match source_side(&analysis.language, &scaffold.crate_name) {
+    let source = match source_side(
+        &analysis.language,
+        &scaffold.crate_name,
+        &analysis.source_dir,
+    ) {
         Some(s) => s,
         None => {
             emit(
                 progress_cb,
                 Progress::Note {
                     message: format!(
-                        "Behavior: source language `{}` not yet supported — skipping.",
+                        "Behavior: no runnable entrypoint for the `{}` source \
+                         (library, or language unsupported) — skipping.",
                         analysis.language
                     ),
                 },
             );
             return skip(&format!(
-                "unsupported source language: {}",
+                "no runnable source entrypoint ({})",
                 analysis.language
             ));
         }

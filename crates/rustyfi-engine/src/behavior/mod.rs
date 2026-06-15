@@ -585,7 +585,8 @@ cases:
         use std::path::Path;
         // CARGO_MANIFEST_DIR = crates/rustyfi-engine; ../.. = repo root.
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let source = source_side("go", "calculator").expect("go recipe");
+        let source =
+            source_side("go", "calculator", &repo.join("examples/calculator")).expect("go recipe");
         let target = target_side("calculator");
         let work = tempfile::tempdir().unwrap();
         let out = generate_and_verify(
