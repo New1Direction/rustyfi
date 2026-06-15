@@ -305,6 +305,7 @@ where
             );
         }
 
+        let retriever = build_flywheel_retriever();
         phase_translate(
             &config,
             &store,
@@ -314,6 +315,7 @@ where
             &package_map,
             &contract_cp,
             existing,
+            retriever.as_ref(),
             &mut progress_cb,
             &mut orch,
         )?
@@ -485,6 +487,22 @@ where
         files_failed,
     );
 
+    // ── Flywheel close: bank verified pairs from a clean run ──────────────
+    // A clean compile means every translated file is now ground truth. Harvest
+    // the new (source → Rust) pairs into the local growth cache so future runs
+    // can retrieve them. Fail-open: never let this affect the run's result.
+    if verification_cp.exit_clean && std::env::var_os("RUSTYFI_NO_FLYWHEEL").is_none() {
+        if let Some(cache) = crate::corpus::store::local_cache_path() {
+            let pairs = crate::corpus::harvest::harvest_crate(
+                &scaffold_cp.workspace_path,
+                &analysis_cp.source_dir,
+            );
+            if !pairs.is_empty() {
+                let _ = crate::corpus::store::append_jsonl(&cache, &pairs);
+            }
+        }
+    }
+
     Ok(RunResult {
         zip,
         crate_name: packaging_cp.crate_name,
@@ -636,6 +654,8 @@ fn phase_scaffold(
 const PKG_SRC_BUDGET: usize = 24_000;
 /// Max bytes of contract context injected into a body-translation prompt.
 const CONTRACT_CTX_BUDGET: usize = 8_000;
+/// Max bytes of verified-pair (flywheel) few-shot context per prompt.
+const CORPUS_CTX_BUDGET: usize = 8_000;
 
 fn phase_contract<F>(
     config: &RunConfig,
@@ -994,6 +1014,64 @@ fn build_contract_context(
     truncate_utf8(&ctx, CONTRACT_CTX_BUDGET).to_string()
 }
 
+/// Render retrieved verified pairs as few-shot guidance for the translate
+/// prompt (the flywheel). Compile-tier pairs are labelled honestly: they prove
+/// the Rust COMPILES, not that it behaves identically (the divergence probe
+/// showed a crate can compile clean yet diverge — e.g. float formatting).
+fn build_corpus_context(
+    source: &str,
+    lang: &str,
+    retriever: &crate::corpus::retrieve::Retriever,
+) -> String {
+    use crate::corpus::{signal::api_surface, Tier};
+    let q = api_surface(source);
+    let pairs = retriever.top_k(&q, lang, 3);
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let mut ctx = String::from(
+        "// Verified examples — prior translations of source with a similar API \
+         surface that passed `cargo check`. Follow their structure.\n",
+    );
+    for p in pairs {
+        let note = match p.tier {
+            Tier::Behavior => "verified: compiles AND behaves identically",
+            Tier::Compile => {
+                "verified: compiles (behavior not verified — match structure, not every literal)"
+            }
+        };
+        let block = format!(
+            "// [{note}] {lang} -> rust\n// SOURCE:\n{}\n// RUST:\n{}\n\n",
+            p.source_code, p.rust_code
+        );
+        if ctx.len() + block.len() > CORPUS_CTX_BUDGET {
+            break;
+        }
+        ctx.push_str(&block);
+    }
+    ctx
+}
+
+/// Build the flywheel retriever from the binary-embedded seed corpus plus the
+/// local growth cache. `None` if disabled (`RUSTYFI_NO_FLYWHEEL`) or both
+/// sources are empty (fail-open — translation proceeds unchanged).
+fn build_flywheel_retriever() -> Option<crate::corpus::retrieve::Retriever> {
+    if std::env::var_os("RUSTYFI_NO_FLYWHEEL").is_some() {
+        return None;
+    }
+    const SEED: &str = include_str!("../../../corpus/seed.jsonl");
+    let seed = crate::corpus::store::parse_jsonl(SEED);
+    let local = crate::corpus::store::local_cache_path()
+        .map(|p| crate::corpus::store::read_jsonl(&p))
+        .unwrap_or_default();
+    if seed.is_empty() && local.is_empty() {
+        return None;
+    }
+    Some(crate::corpus::retrieve::Retriever::from_sources(
+        seed, local,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3: Translation — DAG-scheduled, semantically chunked, context-injected
 // ---------------------------------------------------------------------------
@@ -1008,6 +1086,7 @@ fn phase_translate<F>(
     package_map: &crate::scaffold::PackageMap,
     contract: &ContractCheckpoint,
     existing: Option<TranslationCheckpoint>,
+    retriever: Option<&crate::corpus::retrieve::Retriever>,
     progress_cb: &mut F,
     orch: &mut Orchestrator,
 ) -> Result<TranslationCheckpoint, EngineError>
@@ -1128,7 +1207,29 @@ where
         let contexts: Vec<String> = batch
             .iter()
             .map(|p| {
-                build_contract_context(p, &analysis.source_dir, &graph, package_map, &contract_map)
+                let mut ctx = build_contract_context(
+                    p,
+                    &analysis.source_dir,
+                    &graph,
+                    package_map,
+                    &contract_map,
+                );
+                // Flywheel: append verified (source → Rust) few-shot examples for
+                // source with a similar API surface. Fail-open: no retriever or no
+                // match → context unchanged.
+                if let Some(r) = retriever {
+                    if let (Ok(src), Some(lang)) = (
+                        fs::read_to_string(p),
+                        crate::analysis::detect_language_key(p),
+                    ) {
+                        let corpus_ctx = build_corpus_context(&src, &lang, r);
+                        if !corpus_ctx.is_empty() {
+                            ctx.push('\n');
+                            ctx.push_str(&corpus_ctx);
+                        }
+                    }
+                }
+                ctx
             })
             .collect();
 
@@ -3300,6 +3401,42 @@ fn unix_now() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn corpus_context_labels_compile_tier_honestly() {
+        use crate::corpus::{retrieve::Retriever, CorpusEntry, Tier};
+        let r = Retriever::from_sources(
+            vec![CorpusEntry {
+                source_lang: "go".into(),
+                source_api: vec!["fmt.Printf".into()],
+                source_code: "fmt.Printf()".into(),
+                rust_code: "println!()".into(),
+                crate_name: "c".into(),
+                file: "m.go".into(),
+                tier: Tier::Compile,
+            }],
+            vec![],
+        );
+        let ctx = build_corpus_context("fmt.Printf(\"x\")", "go", &r);
+        assert!(ctx.contains("println!"));
+        assert!(ctx.to_lowercase().contains("behavior not verified"));
+    }
+
+    #[test]
+    fn corpus_context_empty_when_no_match() {
+        use crate::corpus::retrieve::Retriever;
+        let r = Retriever::from_sources(vec![], vec![]);
+        assert!(build_corpus_context("anything", "go", &r).is_empty());
+    }
+
+    #[test]
+    fn embedded_seed_ships_in_the_binary() {
+        // The moat ships in the box: the seed is baked in via include_str!.
+        const SEED: &str = include_str!("../../../corpus/seed.jsonl");
+        let entries = crate::corpus::store::parse_jsonl(SEED);
+        assert!(!entries.is_empty(), "embedded seed should ship with pairs");
+        assert!(entries.iter().any(|e| e.crate_name == "calculator"));
+    }
 
     #[test]
     fn behavior_repair_accepts_only_strict_improvement_that_compiles() {

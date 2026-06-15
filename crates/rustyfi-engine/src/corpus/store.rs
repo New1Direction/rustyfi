@@ -5,16 +5,22 @@ use std::path::{Path, PathBuf};
 
 use crate::corpus::CorpusEntry;
 
+/// Parse JSONL text into corpus entries. Blank/unparseable lines are skipped
+/// (fail-open). Used for both on-disk reads and the binary-embedded seed.
+pub fn parse_jsonl(text: &str) -> Vec<CorpusEntry> {
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<CorpusEntry>(l).ok())
+        .collect()
+}
+
 /// Read a JSONL corpus. A missing file or any unparseable line is skipped —
 /// the corpus is an enhancement, never a hard dependency (fail-open).
 pub fn read_jsonl(path: &Path) -> Vec<CorpusEntry> {
     let Ok(text) = fs::read_to_string(path) else {
         return Vec::new();
     };
-    text.lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(|l| serde_json::from_str::<CorpusEntry>(l).ok())
-        .collect()
+    parse_jsonl(&text)
 }
 
 /// Append entries as JSONL, creating the file and parent dirs as needed.
