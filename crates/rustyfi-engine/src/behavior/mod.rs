@@ -25,6 +25,8 @@ pub use mine::{help_case, mine_readme};
 mod recipe;
 pub(crate) use recipe::{source_side, target_side};
 
+pub mod lib_oracle;
+
 /// A full behavioral-equivalence spec (`behavior.yaml`). Self-contained after
 /// golden capture: `cases[].expect` holds the source's captured output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
