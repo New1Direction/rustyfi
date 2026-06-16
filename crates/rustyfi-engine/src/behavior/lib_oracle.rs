@@ -217,6 +217,40 @@ fn read_mod_decls(out_dir: &Path) -> String {
         .join("\n")
 }
 
+/// The library's own source (minus tests/docs) as the API context handed to the
+/// source-driver generator. Bounded; empty for languages with no runnable source
+/// driver (the caller then skips honestly).
+pub fn source_api_context(src_dir: &Path, language: &str) -> String {
+    let ext = match language {
+        "python" => "py",
+        _ => return String::new(),
+    };
+    let mut out = String::new();
+    for e in walkdir::WalkDir::new(src_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if e.path().extension().and_then(|s| s.to_str()) != Some(ext) {
+            continue;
+        }
+        let p = e.path().to_string_lossy();
+        if p.contains("/test")
+            || p.contains("/docs")
+            || p.contains("conftest")
+            || p.contains("setup")
+        {
+            continue;
+        }
+        if let Ok(t) = std::fs::read_to_string(e.path()) {
+            out.push_str(&format!("// FILE: {}\n{t}\n\n", e.path().display()));
+            if out.len() > 12_000 {
+                break;
+            }
+        }
+    }
+    out
+}
+
 // ── runners (I/O) ─────────────────────────────────────────────────────────────
 
 /// Run the generated source driver, returning its stdout (the golden output).

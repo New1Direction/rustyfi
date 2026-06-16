@@ -2370,20 +2370,73 @@ fn phase_behavior<F: FnMut(Progress)>(
     ) {
         Some(s) => s,
         None => {
+            // No CLI entrypoint (library). Under --deep, verify the public API
+            // via the synthesized library-driver oracle; otherwise skip honestly.
+            if std::env::var("RUSTYFI_DEEP_FIX").is_err() {
+                emit(
+                    progress_cb,
+                    Progress::Note {
+                        message: format!(
+                            "Behavior: no CLI entrypoint for the `{}` source (library) — \
+                             skipping (run with --deep to synthesize a library driver).",
+                            analysis.language
+                        ),
+                    },
+                );
+                return skip(&format!(
+                    "no runnable source entrypoint ({})",
+                    analysis.language
+                ));
+            }
             emit(
                 progress_cb,
                 Progress::Note {
-                    message: format!(
-                        "Behavior: no runnable entrypoint for the `{}` source \
-                         (library, or language unsupported) — skipping.",
-                        analysis.language
-                    ),
+                    message: "Behavior: no CLI entrypoint — synthesizing a library driver to \
+                              verify the public API against the source (--deep)…"
+                        .into(),
                 },
             );
-            return skip(&format!(
-                "no runnable source entrypoint ({})",
-                analysis.language
-            ));
+            let source_api = crate::behavior::lib_oracle::source_api_context(
+                &analysis.source_dir,
+                &analysis.language,
+            );
+            let report = crate::behavior::lib_oracle::verify_library(
+                &scaffold.workspace_path,
+                &analysis.source_dir,
+                &analysis.language,
+                &source_api,
+                fix_llm,
+            );
+            if let Some(reason) = report.skipped_reason {
+                emit(
+                    progress_cb,
+                    Progress::Note {
+                        message: format!("Behavior (library oracle): skipped — {reason}"),
+                    },
+                );
+                return skip(&format!("library oracle: {reason}"));
+            }
+            let msg = if report.matched {
+                "Behavior (library oracle): ✓ public API verified identical to the source"
+            } else {
+                "Behavior (library oracle): ✗ divergence or incomplete translation"
+            };
+            emit(
+                progress_cb,
+                Progress::Note {
+                    message: msg.to_string(),
+                },
+            );
+            return BehaviorCheckpoint {
+                ran: report.ran,
+                verified: report.matched,
+                mined: 1,
+                matched: usize::from(report.matched),
+                total: 1,
+                quarantined: 0,
+                skipped_reason: None,
+                repair: None,
+            };
         }
     };
     let target = target_side(&scaffold.crate_name);
