@@ -25,6 +25,8 @@ pub use mine::{help_case, mine_readme};
 mod recipe;
 pub(crate) use recipe::{source_side, target_side};
 
+pub mod lib_oracle;
+
 /// A full behavioral-equivalence spec (`behavior.yaml`). Self-contained after
 /// golden capture: `cases[].expect` holds the source's captured output.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -585,7 +587,8 @@ cases:
         use std::path::Path;
         // CARGO_MANIFEST_DIR = crates/rustyfi-engine; ../.. = repo root.
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let source = source_side("go", "calculator").expect("go recipe");
+        let source =
+            source_side("go", "calculator", &repo.join("examples/calculator")).expect("go recipe");
         let target = target_side("calculator");
         let work = tempfile::tempdir().unwrap();
         let out = generate_and_verify(

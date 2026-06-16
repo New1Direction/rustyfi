@@ -211,6 +211,13 @@ fn language_key(lang: &SourceLanguage) -> String {
     .to_string()
 }
 
+/// Lowercase language key for a path (e.g. "go", "typescript"), or `None` if
+/// the extension is unrecognised. Shared by the corpus harvester and retriever
+/// so both sides agree on the language string.
+pub fn detect_language_key(path: &std::path::Path) -> Option<String> {
+    detect_language(path).map(|l| language_key(&l))
+}
+
 fn key_to_language(key: &str) -> SourceLanguage {
     match key {
         "python" => SourceLanguage::Python,

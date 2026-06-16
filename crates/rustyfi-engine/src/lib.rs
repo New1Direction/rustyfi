@@ -5,6 +5,7 @@ pub mod behavior;
 pub mod checkpoint;
 pub mod chunker;
 pub mod contract_check;
+pub mod corpus;
 pub mod dedup_items;
 pub mod deps;
 pub mod fix_context;
