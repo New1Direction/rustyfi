@@ -252,10 +252,19 @@ rustyfi verify-behavior ./myapp-rust
 edit, and re-verify the crate, keeping changes only when the crate still
 compiles *and* the mismatch count strictly decreases.
 
-**Honest scope:** behavioral verification is CLI-tool-only for now (library and
-HTTP service support is planned). Because it runs the source project, it is a
-local/CLI-only phase — the hosted web flow does not execute uploaded code.
-Skip it with `--no-behavior`.
+**Honest scope:** behavioral verification **auto-runs for CLI tools** today.
+Because it runs the source project, it is a local-only phase — the hosted web
+flow never executes uploaded code. Skip it with `--no-behavior`.
+
+**Library behavioral verification is proven and rolling out.** Most real targets
+are libraries (no CLI to diff), so the engine synthesizes a thin *driver* that
+exercises the public API in *both* the source language and Rust, then diffs the
+output — turning a library into a comparable program. On `itsdangerous` the
+translated `Signer` verified **byte-identical to Python** (sign, unsign, and
+tamper-rejection), with both drivers model-generated. It ships today as a
+verified engine capability; auto-wiring it into every library translation is
+gated behind a flag while it hardens (it costs a model call per run). HTTP
+service support is still planned.
 
 ---
 

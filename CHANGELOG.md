@@ -4,6 +4,44 @@ All notable changes to Rustyfi are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+The release where behavioral verification reached **libraries** — most real
+targets are libraries, and the second oracle could previously only verify CLIs.
+
+### Added
+- **Automated library behavioral oracle** (`behavior/lib_oracle.rs`). For a
+  library (no CLI entrypoint), the engine synthesizes a thin driver that
+  exercises the public API in *both* the source language and Rust, runs both, and
+  diffs stdout (canonicalized for language reprs like Python `True` vs Rust
+  `true`). Both drivers are model-generated, with bounded compile/run repair
+  loops; fail-open. Proven end-to-end on `itsdangerous` — the translated `Signer`
+  verified byte-identical to Python (sign, unsign, tamper-rejection). Shipped as a
+  verified engine capability + `examples/lib_oracle`; auto-wiring into the
+  pipeline is gated while it hardens. See
+  `docs/superpowers/specs/2026-06-15-library-behavioral-oracle.md`.
+- **End-to-end product bench (Round 1)**, real crates through the release CLI with
+  `--deep`: **3/4 clean** (calculator, itsdangerous, emoji-java; paint partial).
+  First proof the HTTP `--deep` doctor *converges* a real crate end-to-end
+  (`emoji-java`, "partial" expectation → 0 errors via `deepseek-reasoner`), and
+  the behavioral oracle running on real crates (calculator verified identical;
+  itsdangerous now honestly skipped — see below).
+
+### Fixed
+- **Behavioral oracle no longer fabricates false mismatches on libraries.** The
+  recipe hard-coded `python3 main.py` / `node index.js` without checking the
+  entrypoint exists; for a library (no `main.py`) the interpreter's "can't open
+  file" error was captured as golden output, flagging every translation as a
+  false behavioral mismatch. It now skips honestly when there is no runnable
+  entrypoint.
+
+### Notes
+- **Translation flywheel: no measured lift.** A fair A/B (contract in both arms,
+  3 seeds) showed the file-level corpus-injection flywheel does not improve
+  first-shot error counts (delta +1.59); it ships **experimental / off by
+  default**, the "moat" framing retracted. Details:
+  `docs/superpowers/specs/2026-06-15-flywheel-ab-results.md`.
+
 ## [0.4.0] — 2026-06-14
 
 The release where the recipe first carried a **real foreign project all the way

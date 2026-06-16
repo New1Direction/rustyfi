@@ -316,6 +316,13 @@
           <li><b><code>--deep</code> repair</b> — agentic doctor targets only failing cases; edits kept only when diff improves <em>and</em> still compiles.</li>
         </ul>
       </div>
+
+      <div class="card wide">
+        <span class="kicker">now reaching libraries · new</span>
+        <h3>Most real targets are libraries. The second oracle now reaches them.</h3>
+        <p>A library has no CLI to diff. So Rustyfi synthesizes a thin <em>driver</em> that exercises the public API in <em>both</em> the source language and Rust, then diffs the output — turning a library into a comparable program. On <code>itsdangerous</code>, the translated <code>Signer</code> verified <b>byte-identical to Python</b> across <code>sign</code>, <code>unsign</code>, and tamper-rejection — both drivers model-generated, the diff normalized for harmless language reprs (Python <code>True</code> vs Rust <code>true</code>).</p>
+        <p style="margin-top:0.9rem;color:var(--muted)">It ships today as a verified engine capability; auto-wiring it into every library translation is gated behind a flag while it hardens (it costs a model call per run). It is honest by construction — when it can't synthesize a runnable driver it skips rather than inventing a false mismatch.</p>
+      </div>
     </div>
   </section>
 
