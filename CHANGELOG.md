@@ -4,7 +4,7 @@ All notable changes to Rustyfi are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.5.0] — 2026-06-15
 
 The release where behavioral verification reached **libraries** — most real
 targets are libraries, and the second oracle could previously only verify CLIs.
